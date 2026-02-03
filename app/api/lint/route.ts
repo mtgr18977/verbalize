@@ -27,6 +27,8 @@ export async function POST(req: NextRequest) {
     await fs.writeFile(tmpFile, text);
 
     // Create a temporary .vale.ini that points to our styles directory
+    // In some environments (like Netlify/Vercel), we might need to use relative paths
+    // or ensure the styles directory is copied.
     const stylesPath = path.join(process.cwd(), 'styles');
     const valeIni = `
 StylesPath = ${stylesPath}
@@ -38,6 +40,14 @@ BasedOnStyles = ${style}
     await fs.writeFile(iniFile, valeIni);
 
     const valePath = path.join(process.cwd(), 'vale');
+
+    // Ensure the binary is executable. This is crucial for serverless environments
+    // where file permissions might not be preserved during deployment.
+    try {
+      await fs.chmod(valePath, 0o755);
+    } catch (err) {
+      console.warn('Could not chmod vale binary:', err);
+    }
 
     try {
       // Use --config to point to our temporary .vale.ini
