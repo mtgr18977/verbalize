@@ -59,7 +59,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, style, customRules }),
       });
-      const data = await response.json();
+      const data: ValeAlert[] = await response.json();
       if (Array.isArray(data)) {
         setResults(data);
       } else {

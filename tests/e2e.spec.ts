@@ -1,9 +1,24 @@
 
 import { test, expect } from '@playwright/test';
 
+interface ValeAlert {
+  Action: {
+    Name: string;
+    Params: string[] | null;
+  };
+  Span: [number, number];
+  Check: string;
+  Description: string;
+  Link: string;
+  Message: string;
+  Severity: string;
+  Match: string;
+  Line: number;
+}
+
 test.describe('Writer Assistant', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('http://localhost:3000');
+    await page.goto('/');
   });
 
   test('should have the correct title', async ({ page }) => {
@@ -43,7 +58,7 @@ test.describe('Writer Assistant', () => {
   });
 
   test('API should handle custom rules', async ({ request }) => {
-    const response = await request.post('http://localhost:3000/api/lint', {
+    const response = await request.post('/api/lint', {
       data: {
         text: 'This is extremely very good.',
         style: 'Google',
@@ -61,8 +76,8 @@ tokens:
     });
 
     expect(response.ok()).toBeTruthy();
-    const results = await response.json();
+    const results: ValeAlert[] = await response.json();
     expect(Array.isArray(results)).toBeTruthy();
-    expect(results.some((a: any) => a.Check === 'Custom.test-rule')).toBeTruthy();
+    expect(results.some((a: ValeAlert) => a.Check === 'Custom.test-rule')).toBeTruthy();
   });
 });

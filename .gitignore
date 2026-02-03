@@ -7,3 +7,5 @@ vale.exe
 *.zip
 *.tar.gz
 dev_server.log
+test-results/
+playwright-report/
