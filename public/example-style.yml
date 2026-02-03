@@ -1,0 +1,9 @@
+extends: existence
+message: "Consider removing '%s'"
+level: suggestion
+tokens:
+  - very
+  - extremely
+  - really
+  - quite
+  - perhaps
