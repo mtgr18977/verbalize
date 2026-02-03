@@ -39,7 +39,7 @@ BasedOnStyles = ${style}
     const iniFile = path.join(tmpDir, '.vale.ini');
     await fs.writeFile(iniFile, valeIni);
 
-    const valePath = path.join(process.cwd(), 'vale');
+    const valePath = path.join(process.cwd(), process.platform === 'win32' ? 'vale.exe' : 'vale');
 
     // Ensure the binary is executable. This is crucial for serverless environments
     // where file permissions might not be preserved during deployment.
