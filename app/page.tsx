@@ -59,9 +59,9 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, style, customRules }),
       });
-      const data: ValeAlert[] = await response.json();
-      if (Array.isArray(data)) {
-        setResults(data);
+      const data = await response.json();
+      if (response.ok && Array.isArray(data)) {
+        setResults(data as ValeAlert[]);
       } else {
         console.error('Linting error:', data);
         alert('Linting failed: ' + (data.error || 'Unknown error'));
