@@ -60,8 +60,8 @@ export default function Home() {
         body: JSON.stringify({ text, style, customRules }),
       });
       const data = await response.json();
-      if (Array.isArray(data)) {
-        setResults(data);
+      if (response.ok && Array.isArray(data)) {
+        setResults(data as ValeAlert[]);
       } else {
         console.error('Linting error:', data);
         alert('Linting failed: ' + (data.error || 'Unknown error'));
@@ -322,8 +322,8 @@ export default function Home() {
 
           {/* Column 3: Results */}
           <section className="flex flex-col bg-gray-50/30 dark:bg-gray-900/50 overflow-hidden">
-            <div className="h-12 px-6 flex items-center justify-between border-b border-gray-50 bg-gray-50/50 shrink-0">
-              <span className="text-[10px] font-black uppercase tracking-widest text-gray-400 flex items-center gap-2">
+            <div className="h-12 px-6 flex items-center justify-between border-b border-gray-50 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50 shrink-0">
+              <span className="text-[10px] font-black uppercase tracking-widest text-gray-400 dark:text-gray-500 flex items-center gap-2">
                 <div className="w-1.5 h-1.5 rounded-full bg-red-500"></div>
                 Linting Alerts
                 {results.length > 0 && (
@@ -331,7 +331,7 @@ export default function Home() {
                 )}
               </span>
               {results.length > 0 && (
-                <button onClick={() => setResults([])} className="text-[9px] font-bold text-gray-400 hover:text-gray-600 uppercase tracking-tighter">Clear</button>
+                <button onClick={() => setResults([])} className="text-[9px] font-bold text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 uppercase tracking-tighter">Clear</button>
               )}
             </div>
 
