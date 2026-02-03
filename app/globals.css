@@ -1,9 +1,7 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
-@theme {
-  --dark-mode: selector;
-}
+@variant dark (&:where(.dark, .dark *));
 
 :root {
   --background: #ffffff;

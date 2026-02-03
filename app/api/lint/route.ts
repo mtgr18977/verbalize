@@ -40,7 +40,7 @@ export async function POST(req: NextRequest) {
         if (stats.isDirectory()) {
           // Using junction for Windows compatibility if needed, but on Linux 'dir' works fine.
           // In serverless (Linux), symlink is standard.
-          await fs.symlink(fullPath, path.join(tempStylesDir, styleFolder));
+          await fs.symlink(fullPath, path.join(tempStylesDir, styleFolder), process.platform === 'win32' ? 'junction' : 'dir');
         }
       }
     } catch (err) {
