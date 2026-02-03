@@ -12,7 +12,7 @@ const ALLOWED_STYLES = ['Google', 'Microsoft', 'RedHat'];
 
 export async function POST(req: NextRequest) {
   try {
-    const { text, style } = await req.json();
+    const { text, style, customRules } = await req.json();
 
     if (!text) {
       return NextResponse.json({ error: 'No text provided' }, { status: 400 });
@@ -26,15 +26,56 @@ export async function POST(req: NextRequest) {
     const tmpFile = path.join(tmpDir, 'doc.md');
     await fs.writeFile(tmpFile, text);
 
-    // Create a temporary .vale.ini that points to our styles directory
-    // In some environments (like Netlify/Vercel), we might need to use relative paths
-    // or ensure the styles directory is copied.
+    // Create a temporary styles directory to house both built-in and custom styles
+    const tempStylesDir = path.join(tmpDir, 'styles');
+    await fs.mkdir(tempStylesDir, { recursive: true });
+
+    // Symlink existing styles into the temporary styles directory
     const stylesPath = path.join(process.cwd(), 'styles');
+    try {
+      const existingStyles = await fs.readdir(stylesPath);
+      for (const styleFolder of existingStyles) {
+        const fullPath = path.join(stylesPath, styleFolder);
+        const stats = await fs.stat(fullPath);
+        if (stats.isDirectory()) {
+          // Using junction for Windows compatibility if needed, but on Linux 'dir' works fine.
+          // In serverless (Linux), symlink is standard.
+          await fs.symlink(fullPath, path.join(tempStylesDir, styleFolder));
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to symlink existing styles:', err);
+    }
+
+    let basedOnStyles = style;
+
+    if (customRules && Array.isArray(customRules) && customRules.length > 0) {
+      const customStyleDir = path.join(tempStylesDir, 'Custom');
+      await fs.mkdir(customStyleDir, { recursive: true });
+
+      // Add a minimal meta.json for the Custom style to be recognized by Vale
+      await fs.writeFile(path.join(customStyleDir, 'meta.json'), JSON.stringify({
+        name: 'Custom',
+        description: 'User-uploaded rules',
+        feed: ''
+      }));
+
+      for (const rule of customRules) {
+        if (rule.name && rule.content) {
+          // Ensure rule name ends with .yml
+          const ruleName = rule.name.endsWith('.yml') ? rule.name : `${rule.name}.yml`;
+          await fs.writeFile(path.join(customStyleDir, ruleName), rule.content);
+        }
+      }
+
+      basedOnStyles = `${style}, Custom`;
+    }
+
     const valeIni = `
-StylesPath = ${stylesPath}
+StylesPath = ${tempStylesDir}
 MinAlertLevel = suggestion
 [*.md]
-BasedOnStyles = ${style}
+BasedOnStyles = ${basedOnStyles}
 `;
     const iniFile = path.join(tmpDir, '.vale.ini');
     await fs.writeFile(iniFile, valeIni);
