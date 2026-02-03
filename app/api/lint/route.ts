@@ -64,7 +64,13 @@ export async function POST(req: NextRequest) {
         if (rule.name && rule.content) {
           // Ensure rule name ends with .yml
           const ruleName = rule.name.endsWith('.yml') ? rule.name : `${rule.name}.yml`;
-          await fs.writeFile(path.join(customStyleDir, ruleName), rule.content);
+          // Normalize and sanitize the rule name to prevent path traversal
+          const baseName = path.basename(ruleName);
+          const safeRuleName = baseName.replace(/[^a-zA-Z0-9._-]/g, '_');
+          if (!safeRuleName || safeRuleName === '.' || safeRuleName === '..') {
+            continue;
+          }
+          await fs.writeFile(path.join(customStyleDir, safeRuleName), rule.content);
         }
       }
 
