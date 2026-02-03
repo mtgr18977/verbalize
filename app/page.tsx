@@ -51,13 +51,20 @@ export default function Home() {
       alert('Please enter some text to lint.');
       return;
     }
+
+    // Normalize newlines to \n to ensure consistent line/column reporting from Vale
+    const normalizedText = text.replace(/\r\n/g, '\n');
+    if (normalizedText !== text) {
+      setText(normalizedText);
+    }
+
     setLoading(true);
     setResults([]);
     try {
       const response = await fetch('/api/lint', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, style, customRules }),
+        body: JSON.stringify({ text: normalizedText, style, customRules }),
       });
       const data = await response.json();
       if (response.ok && Array.isArray(data)) {
@@ -96,7 +103,7 @@ export default function Home() {
 
     const reader = new FileReader();
     reader.onload = (event) => {
-      const content = event.target?.result as string;
+      const content = (event.target?.result as string).replace(/\r\n/g, '\n');
       setText(content);
     };
     reader.readAsText(file);
@@ -130,30 +137,40 @@ export default function Home() {
     }
   };
 
-  const handleAlertClick = (alert: ValeAlert) => {
+  const handleAlertClick = (alert: ValeAlert, e: React.MouseEvent) => {
+    // Prevent the click from being handled by parent elements if we clicked a link
+    if ((e.target as HTMLElement).closest('a')) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
     if (!editorRef.current) return;
 
     const textarea = editorRef.current;
-    const lines = text.split('\n');
+    // Use the actual textarea value which has normalized newlines
+    const currentValue = textarea.value;
+    const lines = currentValue.split('\n');
     let offset = 0;
 
-    for (let i = 0; i < alert.Line - 1; i++) {
+    // Calculate offset based on current textarea value
+    for (let i = 0; i < Math.min(alert.Line - 1, lines.length); i++) {
       offset += lines[i].length + 1; // +1 for \n
     }
 
     const start = offset + alert.Span[0] - 1;
     const end = offset + alert.Span[1];
 
-    textarea.focus();
-    textarea.setSelectionRange(start, end);
-
     // Scroll selection into view centered
-    const lineHeight = 22.4; // Estimated line height for text-sm leading-relaxed
-    const scrollTo = (alert.Line - 1) * lineHeight - (textarea.clientHeight / 2);
-    textarea.scrollTo({
-      top: Math.max(0, scrollTo),
-      behavior: 'smooth'
-    });
+    // text-sm is 14px, leading-relaxed is typically 1.625, p-8 is 32px
+    const lineHeight = 22.75;
+    const padding = 32;
+    const scrollTo = padding + (alert.Line - 1) * lineHeight - (textarea.clientHeight / 2);
+
+    textarea.scrollTop = Math.max(0, scrollTo);
+    textarea.focus();
+
+    // Setting selection range after focus and scroll for better compatibility
+    textarea.setSelectionRange(start, end);
   };
 
   return (
@@ -375,7 +392,7 @@ export default function Home() {
                   {results.map((alert, index) => (
                     <div
                       key={index}
-                      onClick={() => handleAlertClick(alert)}
+                      onClick={(e) => handleAlertClick(alert, e)}
                       className={`p-4 rounded-xl border bg-white dark:bg-gray-800 shadow-sm transition-all hover:scale-[1.01] hover:shadow-md hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer group ${
                         alert.Severity === 'error' ? 'border-red-100 dark:border-red-900/30' :
                         alert.Severity === 'warning' ? 'border-yellow-100 dark:border-yellow-900/30' : 'border-blue-100 dark:border-blue-900/30'
@@ -427,6 +444,13 @@ export default function Home() {
         }
         .dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
           background: #475569;
+        }
+        textarea::selection {
+          background-color: rgba(59, 130, 246, 0.4);
+          color: inherit;
+        }
+        .dark textarea::selection {
+          background-color: rgba(59, 130, 246, 0.5);
         }
       `}</style>
     </div>
