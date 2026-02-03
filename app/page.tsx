@@ -130,6 +130,32 @@ export default function Home() {
     }
   };
 
+  const handleAlertClick = (alert: ValeAlert) => {
+    if (!editorRef.current) return;
+
+    const textarea = editorRef.current;
+    const lines = text.split('\n');
+    let offset = 0;
+
+    for (let i = 0; i < alert.Line - 1; i++) {
+      offset += lines[i].length + 1; // +1 for \n
+    }
+
+    const start = offset + alert.Span[0] - 1;
+    const end = offset + alert.Span[1];
+
+    textarea.focus();
+    textarea.setSelectionRange(start, end);
+
+    // Scroll selection into view centered
+    const lineHeight = 22.4; // Estimated line height for text-sm leading-relaxed
+    const scrollTo = (alert.Line - 1) * lineHeight - (textarea.clientHeight / 2);
+    textarea.scrollTo({
+      top: Math.max(0, scrollTo),
+      behavior: 'smooth'
+    });
+  };
+
   return (
     <div className="flex h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 overflow-hidden font-sans">
       {/* Sidebar */}
@@ -347,10 +373,14 @@ export default function Home() {
               ) : (
                 <div className="space-y-3">
                   {results.map((alert, index) => (
-                    <div key={index} className={`p-4 rounded-xl border bg-white dark:bg-gray-800 shadow-sm transition-all hover:scale-[1.01] hover:shadow-md group ${
-                      alert.Severity === 'error' ? 'border-red-100 dark:border-red-900/30' :
-                      alert.Severity === 'warning' ? 'border-yellow-100 dark:border-yellow-900/30' : 'border-blue-100 dark:border-blue-900/30'
-                    }`}>
+                    <div
+                      key={index}
+                      onClick={() => handleAlertClick(alert)}
+                      className={`p-4 rounded-xl border bg-white dark:bg-gray-800 shadow-sm transition-all hover:scale-[1.01] hover:shadow-md hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer group ${
+                        alert.Severity === 'error' ? 'border-red-100 dark:border-red-900/30' :
+                        alert.Severity === 'warning' ? 'border-yellow-100 dark:border-yellow-900/30' : 'border-blue-100 dark:border-blue-900/30'
+                      }`}
+                    >
                       <div className="flex items-start justify-between mb-2">
                         <span className={`text-[8px] font-black uppercase px-2 py-0.5 rounded shadow-sm ${
                           alert.Severity === 'error' ? 'bg-red-500 text-white' :
