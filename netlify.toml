@@ -1,0 +1,7 @@
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[functions]
+  # Ensure the vale binary and styles are included in the serverless function bundle
+  included_files = ["vale", "styles/**"]

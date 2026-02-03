@@ -7,8 +7,6 @@
 - Network:       http://192.168.0.2:3000
 
 ✓ Starting...
-✓ Ready in 1629ms
- GET / 200 in 1815ms (compile: 1357ms, render: 457ms)
- GET / 200 in 155ms (compile: 12ms, render: 142ms)
- POST /api/lint 200 in 629ms (compile: 164ms, render: 465ms)
-[?25h
+✓ Ready in 1709ms
+ GET / 200 in 3.6s (compile: 3.2s, render: 340ms)
+ GET / 200 in 150ms (compile: 5ms, render: 145ms)
