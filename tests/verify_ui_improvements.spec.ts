@@ -2,7 +2,7 @@
 import { test, expect } from '@playwright/test';
 
 test('verify yellowish selection color and centered scroll', async ({ page }) => {
-  await page.goto('http://localhost:3000');
+  await page.goto('/');
 
   const textarea = page.locator('textarea');
 
