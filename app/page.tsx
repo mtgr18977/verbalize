@@ -160,15 +160,37 @@ export default function Home() {
     const start = offset + alert.Span[0] - 1;
     const end = offset + alert.Span[1];
 
-    // Scroll selection into view centered
-    // text-sm is 14px, leading-relaxed is typically 1.625, p-8 is 32px
-    const lineHeight = 22.75;
-    const padding = 32;
-    const scrollTo = padding + (alert.Line - 1) * lineHeight - (textarea.clientHeight / 2);
+    // Use a shadow textarea to calculate the scroll position accurately (handles wrapping)
+    const shadow = document.createElement('textarea');
+    const style = window.getComputedStyle(textarea);
+    const props = [
+      'width', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+      'font-size', 'font-family', 'line-height', 'box-sizing',
+      'word-wrap', 'white-space', 'letter-spacing', 'text-transform',
+      'text-align', 'text-indent', 'overflow-wrap'
+    ];
 
+    // Copy styles to shadow textarea
+    props.forEach(prop => {
+      shadow.style.setProperty(prop, style.getPropertyValue(prop));
+    });
+
+    shadow.style.position = 'absolute';
+    shadow.style.visibility = 'hidden';
+    shadow.style.height = '0';
+    shadow.style.overflow = 'hidden';
+
+    // Measure height up to the end of the selection
+    shadow.value = currentValue.substring(0, end);
+    document.body.appendChild(shadow);
+    const selectionBottom = shadow.scrollHeight;
+    document.body.removeChild(shadow);
+
+    // Center the selection
+    const scrollTo = selectionBottom - (textarea.clientHeight / 2);
     textarea.scrollTop = Math.max(0, scrollTo);
-    textarea.focus();
 
+    textarea.focus();
     // Setting selection range after focus and scroll for better compatibility
     textarea.setSelectionRange(start, end);
   };
@@ -446,11 +468,11 @@ export default function Home() {
           background: #475569;
         }
         textarea::selection {
-          background-color: rgba(59, 130, 246, 0.4);
+          background-color: rgba(250, 204, 21, 0.4);
           color: inherit;
         }
         .dark textarea::selection {
-          background-color: rgba(59, 130, 246, 0.5);
+          background-color: rgba(250, 204, 21, 0.5);
         }
       `}</style>
     </div>
