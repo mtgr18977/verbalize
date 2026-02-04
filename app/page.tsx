@@ -380,6 +380,7 @@ export default function Home() {
               className="flex-1 p-10 overflow-y-auto custom-scrollbar"
             >
               <article className="prose prose-slate dark:prose-invert max-w-none prose-headings:font-black prose-headings:tracking-tight prose-a:text-blue-600 prose-img:rounded-xl">
+                {/* ReactMarkdown is secure by default as it does not render HTML unless explicitly configured with rehype-raw */}
                 <ReactMarkdown>{text || '*Rich preview will appear here...*'}</ReactMarkdown>
               </article>
             </div>
