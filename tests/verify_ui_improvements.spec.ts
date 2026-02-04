@@ -59,6 +59,8 @@ test('verify yellowish selection color and centered scroll', async ({ page }) =>
     };
   });
 
-  console.log('Result:', result);
+  if (process.env.DEBUG_UI_TESTS) {
+    console.log('Result:', result);
+  }
   expect(result.diff).toBeLessThan(5);
 });
