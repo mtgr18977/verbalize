@@ -1,7 +1,8 @@
 'use client';
 
-import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
-import { EditorSelection, EditorState } from '@codemirror/state';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from 'react';
+import { Compartment, EditorSelection, EditorState } from '@codemirror/state';
+import type { Extension } from '@codemirror/state';
 import {
   EditorView,
   drawSelection,
@@ -19,7 +20,8 @@ import { tags } from '@lezer/highlight';
 import { GFM, parser as markdownParser } from '@lezer/markdown';
 
 import type { AlertPosition, ReviewAlert } from '@/types/lint';
-import { getFixes } from '@/lib/vale-fixes';
+import { useI18n } from '@/i18n/provider';
+import { describeFix, getFixes } from '@/lib/vale-fixes';
 import type { Fix } from '@/lib/vale-fixes';
 import { safeHttpUrl } from '@/lib/safe-url';
 
@@ -146,6 +148,17 @@ const markdownHighlight = HighlightStyle.define([
   { tag: [tags.processingInstruction, tags.contentSeparator, tags.meta], color: 'var(--ink-2)' },
 ]);
 
+function contentAttributes(ariaLabel: string): Extension {
+  return EditorView.contentAttributes.of({
+    'aria-label': ariaLabel,
+    'aria-multiline': 'true',
+    // Browser spellcheck would draw its own red squiggles over the linter's underlines
+    spellcheck: 'false',
+    autocorrect: 'off',
+    autocapitalize: 'off',
+  });
+}
+
 function getSeverity(severity: string): Diagnostic['severity'] {
   if (severity === 'error') return 'error';
   if (severity === 'warning') return 'warning';
@@ -184,6 +197,56 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
   const lastPositionsRef = useRef<Map<number, AlertPosition>>(new Map());
   // Diagnostic objects keep their original positions; this ties each one to its alert id
   const alertIdsRef = useRef(new WeakMap<Diagnostic, number>());
+  const alertsByIdRef = useRef(new Map<number, ReviewAlert>());
+  // Text that depends on the language lives in compartments, so it can change without a new editor
+  const placeholderCompartmentRef = useRef(new Compartment());
+  const attributesCompartmentRef = useRef(new Compartment());
+
+  const { t, locale } = useI18n();
+  const translateRef = useRef(t);
+  useEffect(() => {
+    translateRef.current = t;
+  });
+
+  /** Builds the CodeMirror diagnostic of an alert: tooltip text and fixes, in the current language. */
+  const buildDiagnostic = useCallback((alert: ReviewAlert, from: number, to: number): Diagnostic => {
+    const translate = translateRef.current;
+    const actions: Action[] = getFixes(alert.Action).map((fix) => ({
+      name: describeFix(fix, translate),
+      apply: (actionView, actionFrom, actionTo) => {
+        runFix(actionView, actionFrom, actionTo, fix);
+        callbacksRef.current.onFixApplied(alert.id);
+      },
+    }));
+    const href = safeHttpUrl(alert.Link);
+
+    const diagnostic: Diagnostic = {
+      from,
+      to,
+      severity: getSeverity(alert.Severity),
+      source: alert.Check,
+      message: alert.Message,
+      actions,
+      renderMessage: () => {
+        const wrapper = document.createElement('span');
+        const message = document.createElement('span');
+        message.textContent = alert.Message;
+        wrapper.appendChild(message);
+        if (href) {
+          const link = document.createElement('a');
+          link.href = href;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          link.className = 'cm-diagnosticLink';
+          link.textContent = ` ${translateRef.current('alerts.styleGuide')}`;
+          wrapper.appendChild(link);
+        }
+        return wrapper;
+      },
+    };
+    alertIdsRef.current.set(diagnostic, alert.id);
+    return diagnostic;
+  }, []);
 
   useEffect(() => {
     callbacksRef.current = { onChange, onPositionsChange, onFixApplied };
@@ -241,7 +304,7 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
           EditorView.lineWrapping,
           markdownSupport,
           syntaxHighlighting(markdownHighlight),
-          placeholder(placeholderText),
+          placeholderCompartmentRef.current.of(placeholder(placeholderText)),
           theme,
           keymap.of([
             // Ctrl/Cmd+Enter runs the review (handled by the page), not "insert blank line"
@@ -250,14 +313,7 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
             { key: 'F8', run: nextDiagnostic },
             { key: 'Shift-F8', run: previousDiagnostic },
           ]),
-          EditorView.contentAttributes.of({
-            'aria-label': ariaLabel,
-            'aria-multiline': 'true',
-            // Browser spellcheck would draw its own red squiggles over the linter's underlines
-            spellcheck: 'false',
-            autocorrect: 'off',
-            autocapitalize: 'off',
-          }),
+          attributesCompartmentRef.current.of(contentAttributes(ariaLabel)),
           EditorView.updateListener.of((update) => {
             if (!update.docChanged) return;
             const text = update.state.doc.toString();
@@ -298,6 +354,8 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
     if (!view) return;
 
     const diagnostics: Diagnostic[] = [];
+    const alertsById = new Map<number, ReviewAlert>();
+    alertsByIdRef.current = alertsById;
     if (reviewedText !== null && view.state.doc.toString() === reviewedText) {
       const doc = view.state.doc;
       for (const alert of alerts) {
@@ -307,41 +365,8 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
         const to = Math.min(line.to, line.from + alert.Span[1]);
         if (to <= from) continue;
 
-        const fixes = getFixes(alert.Action);
-        const actions: Action[] = fixes.map((fix) => ({
-          name: fix.label,
-          apply: (actionView, actionFrom, actionTo) => {
-            runFix(actionView, actionFrom, actionTo, fix);
-            callbacksRef.current.onFixApplied(alert.id);
-          },
-        }));
-        const href = safeHttpUrl(alert.Link);
-
-        const diagnostic: Diagnostic = {
-          from,
-          to,
-          severity: getSeverity(alert.Severity),
-          source: alert.Check,
-          message: alert.Message,
-          actions,
-          renderMessage: () => {
-            const wrapper = document.createElement('span');
-            const message = document.createElement('span');
-            message.textContent = alert.Message;
-            wrapper.appendChild(message);
-            if (href) {
-              const link = document.createElement('a');
-              link.href = href;
-              link.target = '_blank';
-              link.rel = 'noopener noreferrer';
-              link.className = 'cm-diagnosticLink';
-              link.textContent = ' Style guide';
-              wrapper.appendChild(link);
-            }
-            return wrapper;
-          },
-        };
-        alertIdsRef.current.set(diagnostic, alert.id);
+        alertsById.set(alert.id, alert);
+        const diagnostic = buildDiagnostic(alert, from, to);
         diagnostics.push(diagnostic);
       }
     }
@@ -355,7 +380,29 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
     });
     lastPositionsRef.current = positions;
     callbacksRef.current.onPositionsChange(positions);
-  }, [alerts, reviewedText]);
+  }, [alerts, reviewedText, buildDiagnostic]);
+
+  // The language changed: reword the placeholder, the accessible name and the fixes in the tooltips.
+  // The diagnostics are rebuilt where they are now, so alerts keep their tracked positions.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+
+    view.dispatch({
+      effects: [
+        placeholderCompartmentRef.current.reconfigure(placeholder(placeholderText)),
+        attributesCompartmentRef.current.reconfigure(contentAttributes(ariaLabel)),
+      ],
+    });
+
+    const rebuilt: Diagnostic[] = [];
+    forEachDiagnostic(view.state, (diagnostic, from, to) => {
+      const id = alertIdsRef.current.get(diagnostic);
+      const alert = id === undefined ? undefined : alertsByIdRef.current.get(id);
+      if (alert) rebuilt.push(buildDiagnostic(alert, from, to));
+    });
+    if (rebuilt.length > 0) view.dispatch(setDiagnostics(view.state, rebuilt));
+  }, [locale, placeholderText, ariaLabel, buildDiagnostic]);
 
   useImperativeHandle(ref, () => {
     const find = (id: number): { diagnostic: Diagnostic; from: number; to: number } | null => {

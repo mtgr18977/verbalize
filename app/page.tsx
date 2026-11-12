@@ -9,8 +9,12 @@ import { DraftStatusLabel, RestoredNotice } from '@/components/draft-status';
 import { LintEditor } from '@/components/lint-editor';
 import type { LintEditorHandle } from '@/components/lint-editor';
 import { useDraftAutosave } from '@/hooks/use-draft-autosave';
+import { describeApiError } from '@/i18n/api-error';
+import { LOCALES, LOCALE_NAMES, isLocale } from '@/i18n/locale';
+import { useI18n } from '@/i18n/provider';
+import type { Translate } from '@/i18n/translate';
 import type { AlertPosition, CustomRule, ReviewAlert, ValeAlert } from '@/types/lint';
-import { getFixes } from '@/lib/vale-fixes';
+import { describeFix, getFixes } from '@/lib/vale-fixes';
 import { safeHttpUrl } from '@/lib/safe-url';
 
 /** What was linted, so the UI can tell when the results no longer match the editor. */
@@ -95,6 +99,14 @@ function getSeverityTone(severity: string): SeverityTone {
   return { text: 'text-ink-2', decoration: 'decoration-dotted' };
 }
 
+/** Vale reports severities in English; the interface shows them in its own language. */
+function getSeverityLabel(severity: string, t: Translate): string {
+  if (severity === 'error') return t('severity.error');
+  if (severity === 'warning') return t('severity.warning');
+  if (severity === 'suggestion') return t('severity.suggestion');
+  return severity;
+}
+
 /** Builds the compiler-style excerpt: the offending line with a ^^^ pointer under the match. */
 function buildSnippet(line: string, span: [number, number], lineNumber: number): Snippet {
   const flat = line.replace(/\t/g, ' ');
@@ -167,6 +179,7 @@ export default function Home() {
   // false on the server and during hydration, true afterwards: avoids a theme-icon mismatch
   const mounted = useSyncExternalStore(subscribeNoop, () => true, () => false);
   const [snapshot, setSnapshot] = useState<ReviewSnapshot | null>(null);
+  const { t, locale, setLocale, formatTime } = useI18n();
   // `theme` is "system" until the user picks one; `resolvedTheme` is what is actually shown
   const { resolvedTheme, setTheme } = useTheme();
 
@@ -190,7 +203,7 @@ export default function Home() {
   const handleLint = useCallback(async (): Promise<void> => {
     if (loading) return;
     if (!text.trim()) {
-      alert('Please enter some text to lint.');
+      alert(t('error.emptyText'));
       return;
     }
 
@@ -219,15 +232,15 @@ export default function Home() {
         if (!window.matchMedia(DESKTOP_QUERY).matches) setView('alerts');
       } else {
         console.error('Linting error:', data);
-        alert('Linting failed: ' + (data.error || 'Unknown error'));
+        alert(t('error.lintFailed', { message: describeApiError(data, t) }));
       }
     } catch (error) {
       console.error('Failed to lint:', error);
-      alert('Failed to connect to the linting service.');
+      alert(t('error.connection'));
     } finally {
       setLoading(false);
     }
-  }, [loading, text, style, customRules]);
+  }, [loading, text, style, customRules, t]);
 
   // Ctrl/Cmd + Enter runs the review from anywhere, including with the sidebar closed
   useEffect(() => {
@@ -301,7 +314,7 @@ export default function Home() {
   };
 
   const clearEditor = () => {
-    if (text && confirm('Are you sure you want to clear the editor?')) {
+    if (text && confirm(t('editor.confirmClear'))) {
       setText('');
       setResults([]);
       setResolvedIds(new Set());
@@ -388,17 +401,24 @@ export default function Home() {
     return { line: low + 1, column: offset - lineStarts[low] + 1 };
   };
 
-  const reviewTime = snapshot ? snapshot.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+  const reviewTime = snapshot ? formatTime(snapshot.at) : '';
+  const runLabel = t('header.run');
   // Replaces the old "Live Editor" badge: the status always reflects the real state of the text
-  const statusLabel = loading ? 'Reviewing…' : snapshot === null ? 'Not reviewed' : isStale ? 'Out of date' : `Reviewed at ${reviewTime}`;
+  const statusLabel = loading
+    ? t('status.reviewing')
+    : snapshot === null
+      ? t('status.notReviewed')
+      : isStale
+        ? t('status.outOfDate')
+        : t('status.reviewedAt', { time: reviewTime });
 
   const renderEmptyState = (): React.JSX.Element => {
     if (loading) {
       return (
         <PanelMessage
           icon={<LoaderCircle className="w-4 h-4 text-accent animate-spin motion-reduce:animate-none" />}
-          title="Reviewing…"
-          detail={`Checking the text against ${styleLabel}.`}
+          title={t('alerts.reviewingTitle')}
+          detail={t('alerts.reviewingDetail', { style: styleLabel })}
         />
       );
     }
@@ -406,8 +426,8 @@ export default function Home() {
       return (
         <PanelMessage
           icon={<FileSearch className="w-4 h-4 text-ink-2" />}
-          title="Not reviewed yet"
-          detail={`Press Run Linting (Ctrl+Enter) to check this document against ${styleLabel}.`}
+          title={t('alerts.notReviewedTitle')}
+          detail={t('alerts.notReviewedDetail', { run: runLabel, style: styleLabel })}
         />
       );
     }
@@ -415,8 +435,8 @@ export default function Home() {
       return (
         <PanelMessage
           icon={<FileSearch className="w-4 h-4 text-ink-2" />}
-          title="No open alerts"
-          detail="The document changed after the last review. Run Linting again to confirm."
+          title={t('alerts.noOpenTitle')}
+          detail={t('alerts.noOpenDetail', { run: runLabel })}
         />
       );
     }
@@ -424,15 +444,13 @@ export default function Home() {
     return (
       <PanelMessage
         icon={<Check className="w-4 h-4 text-accent" />}
-        title={`No alerts in ${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`}
-        detail={`Reviewed at ${reviewTime} with ${styleLabel}.`}
+        title={t('alerts.noAlertsTitle', { count: lineCount })}
+        detail={t('alerts.noAlertsDetail', { time: reviewTime, style: styleLabel })}
       />
     );
   };
 
-  const staleMessage = textChanged
-    ? 'The text changed after the last review. Alerts follow your edits, and the ones you edited are marked. Press Run Linting (Ctrl+Enter) to refresh.'
-    : 'The style guide or custom rules changed after the last review. Press Run Linting (Ctrl+Enter) to refresh.';
+  const staleMessage = t(textChanged ? 'alerts.staleText' : 'alerts.staleRules', { run: runLabel });
 
   const secondaryButton =
     'flex w-full items-center justify-center gap-2 border border-rule bg-transparent px-3 py-2.5 text-sm font-medium text-ink hover:border-ink-2 hover:bg-paper';
@@ -469,14 +487,14 @@ export default function Home() {
       {/* Settings: a drawer on phones, a column on desktop. `inert` keeps hidden controls out of the tab order. */}
       <aside
         inert={!sidebarVisible}
-        aria-label="Settings"
+        aria-label={t('settings.title')}
         className={`fixed inset-y-0 left-0 z-30 flex w-72 shrink-0 flex-col overflow-hidden border-r border-rule bg-sheet transition-[transform,width] duration-200 motion-reduce:transition-none lg:static lg:z-auto ${
           sidebarOpen === true ? 'translate-x-0' : '-translate-x-full'
         } ${sidebarOpen === false ? 'lg:w-0 lg:translate-x-0' : 'lg:w-72 lg:translate-x-0'}`}
       >
         <div className="flex h-14 shrink-0 items-center justify-between border-b border-rule px-5">
-          <h2 className="text-base font-bold text-ink">Settings</h2>
-          <button onClick={() => setSidebarOpen(false)} aria-label="Close settings" className={iconButton}>
+          <h2 className="text-base font-bold text-ink">{t('settings.title')}</h2>
+          <button onClick={() => setSidebarOpen(false)} aria-label={t('settings.close')} className={iconButton}>
             <X className="h-4 w-4" />
           </button>
         </div>
@@ -484,7 +502,7 @@ export default function Home() {
         <div className="custom-scrollbar flex-1 space-y-7 overflow-y-auto p-5">
           {/* Style Guide Selection */}
           <div className="space-y-2">
-            <label htmlFor="style-guide" className="block text-xs font-semibold text-ink-2">Base style guide</label>
+            <label htmlFor="style-guide" className="block text-xs font-semibold text-ink-2">{t('settings.styleGuide')}</label>
             {/* 16 px on phones: smaller text makes iOS zoom the page when a field is focused */}
             <select
               id="style-guide"
@@ -496,15 +514,15 @@ export default function Home() {
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </select>
-            <p className="text-xs text-ink-2">Primary ruleset for validation.</p>
+            <p className="text-xs text-ink-2">{t('settings.styleGuideHelp')}</p>
           </div>
 
           {/* Document Upload */}
           <div className="space-y-2">
-            <span className="block text-xs font-semibold text-ink-2">Document</span>
+            <span className="block text-xs font-semibold text-ink-2">{t('settings.document')}</span>
             <button onClick={() => docInputRef.current?.click()} className={secondaryButton}>
               <FileText className="h-4 w-4" />
-              <span>Upload MD/MDX</span>
+              <span>{t('settings.uploadDocument')}</span>
             </button>
             <input
               type="file"
@@ -518,13 +536,13 @@ export default function Home() {
           {/* Custom Rules */}
           <div className="space-y-2">
             <div className="flex items-baseline justify-between">
-              <span className="text-xs font-semibold text-ink-2">Custom rules</span>
+              <span className="text-xs font-semibold text-ink-2">{t('settings.customRules')}</span>
               <a
                 href="/example-style.yml"
                 download
                 className="text-xs font-medium text-accent underline underline-offset-2"
               >
-                Download example
+                {t('settings.downloadExample')}
               </a>
             </div>
 
@@ -533,7 +551,7 @@ export default function Home() {
                 {customRules.map((rule, idx) => (
                   <li key={idx} className="flex items-center justify-between border-b border-rule py-1.5">
                     <span className="mr-2 truncate font-mono text-xs text-ink">{rule.name}</span>
-                    <button onClick={() => removeCustomRule(idx)} aria-label={`Remove rule ${rule.name}`} className="p-2 text-ink-2 hover:text-err lg:p-1">
+                    <button onClick={() => removeCustomRule(idx)} aria-label={t('settings.removeRule', { name: rule.name })} className="p-2 text-ink-2 hover:text-err lg:p-1">
                       <Trash2 className="h-4 w-4" />
                     </button>
                   </li>
@@ -546,7 +564,7 @@ export default function Home() {
               className="flex w-full items-center justify-center gap-2 border border-dashed border-ink-2 px-3 py-3 text-sm font-medium text-ink-2 hover:border-ink hover:text-ink"
             >
               <Upload className="h-4 w-4" />
-              <span>Upload .yml rule</span>
+              <span>{t('settings.uploadRule')}</span>
             </button>
             <input
               type="file"
@@ -560,7 +578,7 @@ export default function Home() {
 
           {/* Drafts */}
           <div className="space-y-2">
-            <span className="block text-xs font-semibold text-ink-2">Drafts</span>
+            <span className="block text-xs font-semibold text-ink-2">{t('settings.drafts')}</span>
             <label className="flex cursor-pointer items-start gap-3 text-sm text-ink">
               <input
                 type="checkbox"
@@ -569,12 +587,27 @@ export default function Home() {
                 className="mt-0.5 h-5 w-5 shrink-0 accent-accent lg:h-4 lg:w-4"
               />
               <span>
-                Save my draft in this browser
-                <span className="mt-0.5 block text-xs text-ink-2">
-                  The text and rules stay on this device and are never sent anywhere except to be reviewed. Turn this off on a shared computer: it also deletes the saved draft.
-                </span>
+                {t('settings.saveDraft')}
+                <span className="mt-0.5 block text-xs text-ink-2">{t('settings.saveDraftHelp')}</span>
               </span>
             </label>
+          </div>
+
+          {/* Language: the label is bilingual so it can be found from the wrong language */}
+          <div className="space-y-2">
+            <label htmlFor="language" className="block text-xs font-semibold text-ink-2">{t('settings.language')}</label>
+            <select
+              id="language"
+              value={locale}
+              onChange={(e) => {
+                if (isLocale(e.target.value)) setLocale(e.target.value);
+              }}
+              className="w-full cursor-pointer border border-rule bg-paper px-3 py-2.5 text-base font-medium text-ink lg:text-sm"
+            >
+              {LOCALES.map((code) => (
+                <option key={code} value={code} lang={code}>{LOCALE_NAMES[code]}</option>
+              ))}
+            </select>
           </div>
         </div>
       </aside>
@@ -587,7 +620,7 @@ export default function Home() {
             {/* Always available on phones; on desktop only after the sidebar was closed */}
             <button
               onClick={() => setSidebarOpen(true)}
-              aria-label="Open settings"
+              aria-label={t('settings.open')}
               className={`${iconButton} ${sidebarOpen === false ? '' : 'lg:hidden'}`}
             >
               <Settings className="h-5 w-5" />
@@ -608,19 +641,19 @@ export default function Home() {
             <button
               onClick={() => void handleLint()}
               disabled={loading}
-              title="Run Linting (Ctrl/⌘ + Enter)"
+              title={t('header.runTitle')}
               className="flex items-center gap-2 border border-accent bg-accent px-3 py-2 text-sm font-bold text-on-accent hover:bg-ink hover:border-ink disabled:cursor-wait disabled:bg-ink-2 disabled:border-ink-2 sm:px-4 lg:py-1.5"
             >
               {loading ? <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <PlayCircle className="h-4 w-4" />}
-              <span>{loading ? 'Analyzing...' : 'Run Linting'}</span>
+              <span>{loading ? t('header.running') : runLabel}</span>
               <kbd className="hidden font-mono text-xs font-normal md:inline">Ctrl ↵</kbd>
             </button>
             {mounted && (
               <button
                 onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}
                 className="border border-rule p-2.5 text-ink-2 hover:border-ink-2 hover:text-ink lg:p-1.5"
-                title="Toggle Theme"
-                aria-label="Toggle theme"
+                title={t('header.toggleTheme')}
+                aria-label={t('header.toggleTheme')}
               >
                 {resolvedTheme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
               </button>
@@ -632,28 +665,28 @@ export default function Home() {
         <div className="flex min-h-0 flex-1 flex-col lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(22rem,30%)]">
 
           {/* Document: editor or preview */}
-          <section aria-label="Document" className={`${documentPaneClass} min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-sheet lg:border-r lg:border-rule`}>
+          <section aria-label={t('editor.documentRegion')} className={`${documentPaneClass} min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-sheet lg:border-r lg:border-rule`}>
             <div className="flex h-10 shrink-0 items-center justify-between border-b border-rule bg-paper pl-4 pr-2 lg:pl-0">
               <div className="flex h-full items-center">
                 <div
                   role="tablist"
-                  aria-label="Document view"
+                  aria-label={t('editor.documentView')}
                   onKeyDown={(e) => handleTabKeys(e, TAB_ORDER_DESKTOP)}
                   className="hidden h-full lg:flex"
                 >
-                  <TabButton mode="editor" scope="desktop" selected={view !== 'preview'} onSelect={setView} className={tabClass(view !== 'preview')}>Editor</TabButton>
-                  <TabButton mode="preview" scope="desktop" selected={view === 'preview'} onSelect={setView} className={tabClass(view === 'preview')}>Preview</TabButton>
+                  <TabButton mode="editor" scope="desktop" selected={view !== 'preview'} onSelect={setView} className={tabClass(view !== 'preview')}>{t('editor.editor')}</TabButton>
+                  <TabButton mode="preview" scope="desktop" selected={view === 'preview'} onSelect={setView} className={tabClass(view === 'preview')}>{t('editor.preview')}</TabButton>
                 </div>
-                <span className="lg:hidden"><ColumnLabel>{view === 'preview' ? 'Preview' : 'Editor'}</ColumnLabel></span>
-                <span className="ml-3 font-mono text-xs text-ink-2">{text.length} chars</span>
+                <span className="lg:hidden"><ColumnLabel>{view === 'preview' ? t('editor.preview') : t('editor.editor')}</ColumnLabel></span>
+                <span className="ml-3 font-mono text-xs text-ink-2">{t('editor.chars', { count: text.length })}</span>
                 <span className="ml-3"><DraftStatusLabel status={draft.status} /></span>
               </div>
               {view !== 'preview' && (
                 <div className="flex gap-1">
-                  <button onClick={copyToClipboard} title="Copy Content" aria-label="Copy content" className={`${iconButton} ${copied ? 'text-accent' : ''}`}>
+                  <button onClick={copyToClipboard} title={t('editor.copy')} aria-label={t('editor.copy')} className={`${iconButton} ${copied ? 'text-accent' : ''}`}>
                     {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
                   </button>
-                  <button onClick={clearEditor} title="Clear All" aria-label="Clear editor" className={`${iconButton} hover:text-err`}>
+                  <button onClick={clearEditor} title={t('editor.clear')} aria-label={t('editor.clear')} className={`${iconButton} hover:text-err`}>
                     <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
@@ -664,7 +697,7 @@ export default function Home() {
               <RestoredNotice restoredAt={draft.restoredAt} onDismiss={draft.dismissRestored} onDiscard={discardDraft} />
             )}
 
-            <div id="panel-editor" role="tabpanel" aria-label="Editor" className={`${view === 'preview' ? 'hidden' : 'flex'} min-h-0 flex-1 flex-col`}>
+            <div id="panel-editor" role="tabpanel" aria-label={t('editor.editor')} className={`${view === 'preview' ? 'hidden' : 'flex'} min-h-0 flex-1 flex-col`}>
               <LintEditor
                 ref={editorHandleRef}
                 // 16 px on phones: smaller text makes iOS zoom the page when the editor is focused
@@ -675,30 +708,30 @@ export default function Home() {
                 reviewedText={snapshot?.text ?? null}
                 onPositionsChange={setPositions}
                 onFixApplied={markResolved}
-                placeholderText="Start typing your documentation (Markdown supported)..."
-                ariaLabel="Document text"
+                placeholderText={t('editor.placeholder')}
+                ariaLabel={t('editor.ariaLabel')}
               />
             </div>
 
-            <div id="panel-preview" role="tabpanel" aria-label="Preview" className={`${view === 'preview' ? 'block' : 'hidden'} custom-scrollbar min-h-0 flex-1 overflow-y-auto p-5 lg:p-8`}>
+            <div id="panel-preview" role="tabpanel" aria-label={t('editor.preview')} className={`${view === 'preview' ? 'block' : 'hidden'} custom-scrollbar min-h-0 flex-1 overflow-y-auto p-5 lg:p-8`}>
               <article className="prose prose-diagnostic">
                 {/* ReactMarkdown is secure by default as it does not render HTML unless explicitly configured with rehype-raw */}
-                <ReactMarkdown>{text || '*Rich preview will appear here...*'}</ReactMarkdown>
+                <ReactMarkdown>{text || t('preview.empty')}</ReactMarkdown>
               </article>
             </div>
           </section>
 
           {/* Alerts */}
-          <section id="panel-alerts" role="tabpanel" aria-label="Alerts" className={`${alertsPaneClass} min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-paper`}>
+          <section id="panel-alerts" role="tabpanel" aria-label={t('editor.alerts')} className={`${alertsPaneClass} min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-paper`}>
             <div className="flex h-10 shrink-0 items-center justify-between border-b border-rule px-4">
               <div className="flex items-baseline gap-2">
-                <ColumnLabel>Alerts</ColumnLabel>
+                <ColumnLabel>{t('editor.alerts')}</ColumnLabel>
                 {visibleAlerts.length > 0 && (
                   <span className="font-mono text-xs font-semibold text-ink">{visibleAlerts.length}</span>
                 )}
               </div>
               {results.length > 0 && (
-                <button onClick={() => { setResults([]); setSnapshot(null); }} className="py-2 text-xs font-medium text-accent underline underline-offset-2">Clear</button>
+                <button onClick={() => { setResults([]); setSnapshot(null); }} className="py-2 text-xs font-medium text-accent underline underline-offset-2">{t('alerts.clear')}</button>
               )}
             </div>
 
@@ -739,11 +772,11 @@ export default function Home() {
                       >
                         <div className="flex items-baseline gap-3 text-xs">
                           <span className={`font-mono font-semibold underline decoration-[1.5px] underline-offset-4 ${tone.text} ${tone.decoration}`}>
-                            {alert.Severity}
+                            {getSeverityLabel(alert.Severity, t)}
                           </span>
                           <span className="min-w-0 truncate font-mono text-ink-2">{alert.Check}</span>
                           <span className="ml-auto shrink-0 font-mono text-ink-2">
-                            {stale ? 'text edited' : `L${line}:${span[0]}`}
+                            {stale ? t('alerts.edited') : `L${line}:${span[0]}`}
                           </span>
                         </div>
                         <p className={`mt-1.5 text-sm leading-snug text-ink ${stale ? 'italic' : ''}`}>{alert.Message}</p>
@@ -755,12 +788,12 @@ export default function Home() {
                           <div className="mt-2 flex flex-wrap gap-2">
                             {fixes.map((fix, fixIndex) => (
                               <button
-                                key={fix.label}
+                                key={`${fix.kind}:${fix.value}`}
                                 type="button"
                                 onClick={() => editorHandleRef.current?.applyFix(alert.id, fixIndex)}
                                 className="min-h-9 border border-accent px-2.5 text-xs font-semibold text-accent hover:bg-accent hover:text-on-accent lg:min-h-0 lg:py-1"
                               >
-                                {fix.label}
+                                {describeFix(fix, t)}
                               </button>
                             ))}
                           </div>
@@ -771,9 +804,9 @@ export default function Home() {
                             target="_blank"
                             rel="noopener noreferrer"
                             className="mt-1.5 inline-flex items-center gap-1 py-1 text-xs font-medium text-accent underline underline-offset-2"
-                            aria-label={`Open the style guide page for ${alert.Check}`}
+                            aria-label={t('alerts.styleGuideLabel', { rule: alert.Check })}
                           >
-                            Style guide <ExternalLink className="h-3 w-3" />
+                            {t('alerts.styleGuide')} <ExternalLink className="h-3 w-3" />
                           </a>
                         )}
                       </li>
@@ -788,14 +821,14 @@ export default function Home() {
         {/* Phone navigation: the three panels as tabs, within thumb reach */}
         <div
           role="tablist"
-          aria-label="Panels"
+          aria-label={t('editor.panels')}
           onKeyDown={(e) => handleTabKeys(e, TAB_ORDER_MOBILE)}
           className="flex shrink-0 border-t border-rule bg-sheet pb-[env(safe-area-inset-bottom)] lg:hidden"
         >
-          <TabButton mode="editor" scope="mobile" selected={view === 'editor'} onSelect={setView} className={mobileTabClass(view === 'editor')}>Editor</TabButton>
-          <TabButton mode="preview" scope="mobile" selected={view === 'preview'} onSelect={setView} className={mobileTabClass(view === 'preview')}>Preview</TabButton>
+          <TabButton mode="editor" scope="mobile" selected={view === 'editor'} onSelect={setView} className={mobileTabClass(view === 'editor')}>{t('editor.editor')}</TabButton>
+          <TabButton mode="preview" scope="mobile" selected={view === 'preview'} onSelect={setView} className={mobileTabClass(view === 'preview')}>{t('editor.preview')}</TabButton>
           <TabButton mode="alerts" scope="mobile" selected={view === 'alerts'} onSelect={setView} className={mobileTabClass(view === 'alerts')}>
-            Alerts
+            {t('editor.alerts')}
             {visibleAlerts.length > 0 && (
               <span className={`font-mono text-xs ${isStale ? 'text-warn' : 'text-ink-2'}`}>{visibleAlerts.length}</span>
             )}

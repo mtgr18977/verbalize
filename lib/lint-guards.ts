@@ -1,5 +1,7 @@
 import { parse as parseYaml } from 'yaml';
 
+import type { ApiErrorCode, ApiErrorParams } from '@/lib/api-errors';
+
 /**
  * Limits and request guards for POST /api/lint.
  *
@@ -62,15 +64,26 @@ export interface LintRequest {
   customRules: CustomRule[];
 }
 
+interface RequestErrorOptions {
+  /** Values the interface needs to word the message in the user's language. */
+  params?: ApiErrorParams;
+  headers?: Record<string, string>;
+}
+
 export class RequestError extends Error {
   readonly status: number;
+  readonly code: ApiErrorCode;
+  readonly params: ApiErrorParams;
   readonly headers: Record<string, string>;
 
-  constructor(message: string, status: number, headers: Record<string, string> = {}) {
+  /** `message` is English, for API consumers and logs. The interface translates `code`. */
+  constructor(message: string, status: number, code: ApiErrorCode, options: RequestErrorOptions = {}) {
     super(message);
     this.name = 'RequestError';
     this.status = status;
-    this.headers = headers;
+    this.code = code;
+    this.params = options.params ?? {};
+    this.headers = options.headers ?? {};
   }
 }
 
@@ -89,21 +102,29 @@ function assertSafeRule(rule: CustomRule): void {
     parsed = parseYaml(rule.content, { maxAliasCount: 10 });
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message.split('\n')[0] : 'unknown error';
-    throw new RequestError(`Rule "${label(rule.name)}" is not valid YAML: ${reason}`, 400);
+    throw new RequestError(`Rule "${label(rule.name)}" is not valid YAML: ${reason}`, 400, 'rule_invalid_yaml', {
+      params: { rule: label(rule.name), reason },
+    });
   }
 
   if (!isRecord(parsed)) {
-    throw new RequestError(`Rule "${label(rule.name)}" must be a YAML mapping with an "extends" key`, 400);
+    throw new RequestError(`Rule "${label(rule.name)}" must be a YAML mapping with an "extends" key`, 400, 'rule_not_mapping', {
+      params: { rule: label(rule.name) },
+    });
   }
 
   const extendsValue = parsed.extends;
   if (extendsValue === 'script') {
-    throw new RequestError(`Rule "${label(rule.name)}": script rules are not allowed`, 400);
+    throw new RequestError(`Rule "${label(rule.name)}": script rules are not allowed`, 400, 'rule_script', {
+      params: { rule: label(rule.name) },
+    });
   }
   if (typeof extendsValue !== 'string' || !(ALLOWED_RULE_EXTENDS as readonly string[]).includes(extendsValue)) {
     throw new RequestError(
       `Rule "${label(rule.name)}": "extends" must be one of ${ALLOWED_RULE_EXTENDS.join(', ')}`,
-      400
+      400,
+      'rule_extends',
+      { params: { rule: label(rule.name), allowed: ALLOWED_RULE_EXTENDS.join(', ') } }
     );
   }
 }
@@ -111,40 +132,46 @@ function assertSafeRule(rule: CustomRule): void {
 /** Validates the decoded JSON body. Every field is checked for type before it is used. */
 export function parseLintRequest(body: unknown): LintRequest {
   if (!isRecord(body)) {
-    throw new RequestError('Request body must be a JSON object', 400);
+    throw new RequestError('Request body must be a JSON object', 400, 'invalid_request');
   }
 
   const { text, style, customRules } = body;
 
   if (typeof text !== 'string' || text.length === 0) {
-    throw new RequestError('No text provided or invalid format', 400);
+    throw new RequestError('No text provided or invalid format', 400, 'text_required');
   }
   if (Buffer.byteLength(text, 'utf8') > MAX_INPUT_SIZE) {
     throw new RequestError(
       `Text exceeds the maximum size of ${Math.round(MAX_INPUT_SIZE / 1024)} KB. Lint a shorter section.`,
-      413
+      413,
+      'text_too_large',
+      { params: { maxKb: Math.round(MAX_INPUT_SIZE / 1024) } }
     );
   }
   if (typeof style !== 'string' || !(ALLOWED_STYLES as readonly string[]).includes(style)) {
-    throw new RequestError('Invalid style guide selected', 400);
+    throw new RequestError('Invalid style guide selected', 400, 'invalid_style');
   }
 
   const rules: CustomRule[] = [];
   if (customRules !== undefined && customRules !== null) {
     if (!Array.isArray(customRules)) {
-      throw new RequestError('customRules must be an array', 400);
+      throw new RequestError('customRules must be an array', 400, 'invalid_request');
     }
     if (customRules.length > MAX_CUSTOM_RULES) {
-      throw new RequestError(`Too many custom rules. Maximum is ${MAX_CUSTOM_RULES}`, 400);
+      throw new RequestError(`Too many custom rules. Maximum is ${MAX_CUSTOM_RULES}`, 400, 'too_many_rules', {
+        params: { max: MAX_CUSTOM_RULES },
+      });
     }
     for (const item of customRules as unknown[]) {
       if (!isRecord(item) || typeof item.name !== 'string' || typeof item.content !== 'string') {
-        throw new RequestError('Each custom rule needs a string "name" and a string "content"', 400);
+        throw new RequestError('Each custom rule needs a string "name" and a string "content"', 400, 'invalid_request');
       }
       if (item.content.length > MAX_RULE_LENGTH) {
         throw new RequestError(
           `Rule "${label(item.name)}" exceeds the maximum size of ${MAX_RULE_LENGTH} characters`,
-          400
+          400,
+          'rule_too_large',
+          { params: { rule: label(item.name), max: MAX_RULE_LENGTH } }
         );
       }
       const rule: CustomRule = { name: item.name, content: item.content };
@@ -160,10 +187,10 @@ export function parseLintRequest(body: unknown): LintRequest {
 export async function readLimitedBody(req: Request, limitBytes: number): Promise<string> {
   const declared = Number(req.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > limitBytes) {
-    throw new RequestError('Request body is too large', 413);
+    throw new RequestError('Request body is too large', 413, 'body_too_large');
   }
   if (!req.body) {
-    throw new RequestError('Request body is empty', 400);
+    throw new RequestError('Request body is empty', 400, 'invalid_request');
   }
 
   const reader = req.body.getReader();
@@ -175,7 +202,7 @@ export async function readLimitedBody(req: Request, limitBytes: number): Promise
     received += value.byteLength;
     if (received > limitBytes) {
       await reader.cancel();
-      throw new RequestError('Request body is too large', 413);
+      throw new RequestError('Request body is too large', 413, 'body_too_large');
     }
     chunks.push(value);
   }
@@ -186,7 +213,7 @@ export function parseJson(raw: string): unknown {
   try {
     return JSON.parse(raw);
   } catch {
-    throw new RequestError('Request body is not valid JSON', 400);
+    throw new RequestError('Request body is not valid JSON', 400, 'invalid_request');
   }
 }
 
@@ -197,12 +224,12 @@ export function parseJson(raw: string): unknown {
 export function assertTrustedRequest(req: Request): void {
   const contentType = req.headers.get('content-type')?.toLowerCase() ?? '';
   if (!contentType.startsWith('application/json')) {
-    throw new RequestError('Content-Type must be application/json', 415);
+    throw new RequestError('Content-Type must be application/json', 415, 'unsupported_media_type');
   }
 
   const fetchSite = req.headers.get('sec-fetch-site');
   if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') {
-    throw new RequestError('Cross-site requests are not allowed', 403);
+    throw new RequestError('Cross-site requests are not allowed', 403, 'forbidden');
   }
 
   const origin = req.headers.get('origin');
@@ -215,7 +242,7 @@ export function assertTrustedRequest(req: Request): void {
       originHost = null;
     }
     if (!originHost || originHost !== host) {
-      throw new RequestError('Cross-origin requests are not allowed', 403);
+      throw new RequestError('Cross-origin requests are not allowed', 403, 'forbidden');
     }
   }
 }
@@ -254,8 +281,9 @@ export function enforceRateLimit(req: Request, now: number = Date.now()): void {
   current.count += 1;
   if (current.count > RATE_LIMIT_MAX) {
     const retryAfter = Math.max(1, Math.ceil((current.resetAt - now) / 1000));
-    throw new RequestError('Too many requests. Wait a moment and try again.', 429, {
-      'Retry-After': String(retryAfter),
+    throw new RequestError('Too many requests. Wait a moment and try again.', 429, 'rate_limited', {
+      params: { seconds: retryAfter },
+      headers: { 'Retry-After': String(retryAfter) },
     });
   }
 }
@@ -265,8 +293,8 @@ let activeLints = 0;
 /** Runs `task` only if a Vale slot is free; otherwise answers 503 instead of queueing CPU work. */
 export async function withLintSlot<T>(task: () => Promise<T>): Promise<T> {
   if (activeLints >= MAX_CONCURRENT_LINTS) {
-    throw new RequestError('The linting service is busy. Try again in a few seconds.', 503, {
-      'Retry-After': '5',
+    throw new RequestError('The linting service is busy. Try again in a few seconds.', 503, 'busy', {
+      headers: { 'Retry-After': '5' },
     });
   }
   activeLints += 1;

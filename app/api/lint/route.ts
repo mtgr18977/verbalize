@@ -18,6 +18,7 @@ import {
   withLintSlot,
 } from '@/lib/lint-guards';
 import type { CustomRule, LintRequest } from '@/lib/lint-guards';
+import type { ApiErrorBody } from '@/lib/api-errors';
 
 const execFileAsync = promisify(execFile);
 
@@ -117,12 +118,14 @@ async function runVale(tmpDir: string, request: LintRequest): Promise<unknown[]>
     const execError = error as ExecError;
 
     if (execError.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
-      throw new RequestError('This text produced too many alerts to return. Lint a shorter section.', 413);
+      throw new RequestError('This text produced too many alerts to return. Lint a shorter section.', 413, 'output_too_large');
     }
     if (execError.killed || execError.signal === 'SIGKILL') {
       throw new RequestError(
         `Linting took longer than ${Math.round(LINT_TIMEOUT_MS / 1000)} s and was stopped. Lint a shorter section.`,
-        504
+        504,
+        'timeout',
+        { params: { seconds: Math.round(LINT_TIMEOUT_MS / 1000) } }
       );
     }
 
@@ -131,12 +134,12 @@ async function runVale(tmpDir: string, request: LintRequest): Promise<unknown[]>
       try {
         return parse(execError.stdout);
       } catch {
-        throw new RequestError('Failed to parse Vale output', 500);
+        throw new RequestError('Failed to parse Vale output', 500, 'parse_failed');
       }
     }
 
     console.error('Vale execution failed:', execError.stderr?.slice(0, 500) || execError.message);
-    throw new RequestError('Vale execution failed', 500);
+    throw new RequestError('Vale execution failed', 500, 'vale_failed');
   }
 }
 
@@ -156,10 +159,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json(alerts);
   } catch (error: unknown) {
     if (error instanceof RequestError) {
-      return NextResponse.json({ error: error.message }, { status: error.status, headers: error.headers });
+      const body: ApiErrorBody = { error: error.message, code: error.code, params: error.params };
+      return NextResponse.json(body, { status: error.status, headers: error.headers });
     }
     console.error('Internal server error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    const body: ApiErrorBody = { error: 'Internal server error', code: 'internal' };
+    return NextResponse.json(body, { status: 500 });
   } finally {
     // Covers every path after mkdtemp, including validation and write failures
     if (tmpDir) {

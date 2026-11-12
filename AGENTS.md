@@ -38,8 +38,16 @@ verbalize/
 │   └── lint-editor.tsx           # CodeMirror 6 editor with Vale diagnostics
 ├── hooks/
 │   └── use-draft-autosave.ts     # Saves and restores the draft in localStorage
+├── i18n/
+│   ├── locale.ts                 # Supported languages, Accept-Language negotiation, cookie name
+│   ├── messages.en.ts            # English interface text (source of truth for the keys)
+│   ├── messages.pt-br.ts         # Portuguese (Brazil) interface text
+│   ├── translate.ts              # createTranslator: {placeholders} and plural variants
+│   ├── provider.tsx              # I18nProvider and useI18n (client)
+│   └── api-error.ts              # Words API error codes in the interface language
 ├── lib/
 │   ├── draft-storage.ts          # Defensive localStorage helpers and draft parsing
+│   ├── api-errors.ts             # Error codes of /api/lint, shared with the interface
 │   ├── lint-guards.ts            # Limits and request guards for /api/lint
 │   ├── vale-fixes.ts             # One-click fixes derived from Vale's `Action`
 │   └── safe-url.ts               # Only http(s) links reach an href
@@ -325,6 +333,17 @@ npx playwright show-report
 - The documents can be confidential and `localStorage` is plain text, so "Save my draft in this browser" in the settings turns autosave off and deletes the stored draft.
 - Known limitation: with two tabs open, the last tab to save wins; other tabs' writes are not merged.
 - Tests: `tests/autosave.spec.ts` seeds storage with `addInitScript` (guarded with `sessionStorage` so it runs once per context).
+
+### Internationalization (English and Brazilian Portuguese)
+
+- Every visible string, `aria-label`, tooltip and alert dialog comes from `i18n/messages.en.ts` through `const { t } = useI18n()`. Never write interface text inline. To add a language: add it to `LOCALES` in `i18n/locale.ts` and create a catalog typed `Record<keyof typeof en, string>`; the compiler lists what is missing.
+- `{name}` in a message is replaced by a parameter. A message that depends on a number has `_one` and `_other` variants and is called with `count`: `t('alerts.noAlertsTitle', { count })`. `tests/i18n.spec.ts` checks that both catalogs have the same keys and the same `{placeholders}`, that none is empty, and that nothing was left in English.
+- The language is decided on the server in `app/layout.tsx`: the `verbalize-locale` cookie (an explicit choice) wins over `Accept-Language`, which wins over English. Reading request data makes every page dynamic on purpose, so the first paint is already in the right language. `<html lang>` follows. The cookie is functional (`SameSite=Lax`, one year) and is written by `I18nProvider.setLocale`, which also switches the language at once without reloading.
+- Language-dependent state inside CodeMirror lives in compartments (placeholder, accessible name) and the alert tooltips are rebuilt where the alerts are now, so switching the language does not lose their tracked positions.
+- API errors carry a machine-readable `code` and `params` (`lib/api-errors.ts`). The `error` text stays in English for API consumers; the interface words the error from the code (`describeApiError`). A new `RequestError` needs a code, and a new code needs an `api.<code>` message in both catalogs.
+- What is deliberately not translated: Vale's messages and rule names (the style guides check English text; the settings say so), the product name, and `public/example-style.yml`.
+- Dates and times use `formatTime` and `formatDateTime` from `useI18n`, not the browser default.
+- In tests find the editor with `editor(page)` from `tests/helpers/editor.ts`: its accessible name depends on the language. Playwright's default locale is `en-US`, so the existing tests run in English; use `test.use({ locale: 'pt-BR' })` for Portuguese.
 
 ### Design Constraints
 

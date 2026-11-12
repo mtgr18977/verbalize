@@ -77,6 +77,31 @@ test.describe('POST /api/lint hardening', () => {
     expect(response.status()).toBe(413);
   });
 
+  test('errors carry a code and parameters the interface can translate', async ({ request }) => {
+    const media = await request.post('/api/lint', { headers: { 'Content-Type': 'text/plain' }, data: '{}' });
+    expect((await media.json()).code).toBe('unsupported_media_type');
+
+    const origin = await request.post('/api/lint', { headers: { Origin: 'https://evil.example' }, data: lintBody() });
+    expect((await origin.json()).code).toBe('forbidden');
+
+    const script = await request.post('/api/lint', {
+      data: lintBody({ customRules: [{ name: 'loop.yml', content: 'extends: script\nmessage: x\n' }] }),
+    });
+    const scriptBody = await script.json();
+    expect(scriptBody.code).toBe('rule_script');
+    expect(scriptBody.params).toEqual({ rule: 'loop.yml' });
+    // the English text stays for API consumers
+    expect(scriptBody.error).toContain('script rules are not allowed');
+
+    const big = await request.post('/api/lint', { data: lintBody({ text: 'é'.repeat(150_000) }) });
+    const bigBody = await big.json();
+    expect(bigBody.code).toBe('text_too_large');
+    expect(bigBody.params).toEqual({ maxKb: 200 });
+
+    const style = await request.post('/api/lint', { data: { text: 'hello', style: 'Nope' } });
+    expect((await style.json()).code).toBe('invalid_style');
+  });
+
   test('still accepts valid custom rules', async ({ request }) => {
     const response = await request.post('/api/lint', {
       data: lintBody({ customRules: [{ name: 'terms.yml', content: VALID_RULE }] }),

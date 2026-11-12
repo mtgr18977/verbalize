@@ -1,10 +1,29 @@
+import type { Translate } from '@/i18n/translate';
 import type { ValeAction } from '@/types/lint';
+
+export type FixKind = 'replace' | 'remove' | 'trim' | 'regex';
 
 /** A one-click correction derived from the `Action` Vale attaches to an alert. */
 export interface Fix {
-  label: string;
+  kind: FixKind;
+  /** The replacement text for `replace`, the trimmed characters for `trim`; empty otherwise. */
+  value: string;
   /** Receives the text currently under the alert and returns what should replace it. */
   apply: (matched: string) => string;
+}
+
+/** The wording of a fix in the interface language. */
+export function describeFix(fix: Fix, t: Translate): string {
+  switch (fix.kind) {
+    case 'replace':
+      return t('fix.replace', { value: fix.value });
+    case 'trim':
+      return t('fix.trim', { chars: fix.value });
+    case 'regex':
+      return t('fix.regex');
+    default:
+      return t('fix.remove');
+  }
 }
 
 const MAX_SUGGESTIONS = 4;
@@ -25,7 +44,7 @@ function trimChars(value: string, chars: string, side: TrimSide): string {
   return letters.slice(start, end).join('');
 }
 
-const REMOVE: Fix = { label: 'Remove', apply: () => '' };
+const REMOVE: Fix = { kind: 'remove', value: '', apply: () => '' };
 
 function getEditFixes(params: string[]): Fix[] {
   const [kind, ...rest] = params;
@@ -38,14 +57,14 @@ function getEditFixes(params: string[]): Fix[] {
     case 'trim_right': {
       const chars = rest[0] ?? ' ';
       const side: TrimSide = kind === 'trim_left' ? 'left' : kind === 'trim_right' ? 'right' : 'both';
-      return [{ label: `Trim “${chars}”`, apply: (matched) => trimChars(matched, chars, side) }];
+      return [{ kind: 'trim', value: chars, apply: (matched) => trimChars(matched, chars, side) }];
     }
     case 'regex': {
       const [pattern, replacement] = rest;
       if (pattern === undefined || replacement === undefined) return [];
       try {
         const expression = new RegExp(pattern);
-        return [{ label: 'Apply suggested edit', apply: (matched) => matched.replace(expression, replacement) }];
+        return [{ kind: 'regex', value: '', apply: (matched) => matched.replace(expression, replacement) }];
       } catch {
         // Vale uses Go's regexp flavor; a pattern JavaScript cannot parse is simply not offered
         return [];
@@ -66,7 +85,7 @@ export function getFixes(action: ValeAction | null | undefined): Fix[] {
       return params.slice(0, MAX_SUGGESTIONS).map((replacement) =>
         replacement === ''
           ? REMOVE
-          : { label: `Replace with “${replacement}”`, apply: () => replacement }
+          : { kind: 'replace', value: replacement, apply: () => replacement }
       );
     case 'remove':
       return [REMOVE];

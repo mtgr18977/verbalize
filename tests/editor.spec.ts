@@ -1,7 +1,8 @@
 import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
 import { docText, editor, review } from './helpers/editor';
-import { getFixes } from '../lib/vale-fixes';
+import { createTranslator } from '../i18n/translate';
+import { describeFix, getFixes } from '../lib/vale-fixes';
 import { safeHttpUrl } from '../lib/safe-url';
 
 const DOC = '# Install.\n\nWe really use this in order to test it.\nThe file was deleted by the user.';
@@ -170,7 +171,12 @@ test.describe('alerts in the text', () => {
 test.describe('fixes derived from Vale actions', () => {
   test('replace offers up to four suggestions', () => {
     const fixes = getFixes({ Name: 'replace', Params: ['a', 'b', 'c', 'd', 'e'] });
-    expect(fixes.map((fix) => fix.label)).toEqual(['Replace with “a”', 'Replace with “b”', 'Replace with “c”', 'Replace with “d”']);
+    expect(fixes.map((fix) => [fix.kind, fix.value])).toEqual([
+      ['replace', 'a'],
+      ['replace', 'b'],
+      ['replace', 'c'],
+      ['replace', 'd'],
+    ]);
     expect(fixes[1].apply('anything')).toBe('b');
   });
 
@@ -187,6 +193,28 @@ test.describe('fixes derived from Vale actions', () => {
     expect(getFixes({ Name: 'edit', Params: ['swap', 'a', 'b'] })).toEqual([]);
     expect(getFixes({ Name: 'edit', Params: ['regex', '(unclosed', 'x'] })).toEqual([]);
     expect(getFixes(null)).toEqual([]);
+  });
+
+  test('fixes are worded in the interface language', () => {
+    const en = createTranslator('en');
+    const pt = createTranslator('pt-BR');
+    const [replace] = getFixes({ Name: 'replace', Params: ['to'] });
+    const [trim] = getFixes({ Name: 'edit', Params: ['trim_right', '.'] });
+    const [remove] = getFixes({ Name: 'remove', Params: null });
+    const [regex] = getFixes({ Name: 'edit', Params: ['regex', 'a', 'b'] });
+
+    expect([replace, trim, remove, regex].map((fix) => describeFix(fix, en))).toEqual([
+      'Replace with “to”',
+      'Trim “.”',
+      'Remove',
+      'Apply suggested edit',
+    ]);
+    expect([replace, trim, remove, regex].map((fix) => describeFix(fix, pt))).toEqual([
+      'Substituir por “to”',
+      'Remover “.”',
+      'Remover',
+      'Aplicar a edição sugerida',
+    ]);
   });
 });
 

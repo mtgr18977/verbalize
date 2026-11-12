@@ -1,8 +1,11 @@
 import type { Locator, Page } from '@playwright/test';
 
-/** The CodeMirror content element, found the way a screen reader would find it. */
+/**
+ * The CodeMirror content element: the text box inside the editor. Its accessible name depends on
+ * the interface language, so it is found through the editor's test id.
+ */
 export function editor(page: Page): Locator {
-  return page.getByRole('textbox', { name: 'Document text' });
+  return page.getByTestId('editor').getByRole('textbox');
 }
 
 export async function setText(page: Page, text: string): Promise<void> {

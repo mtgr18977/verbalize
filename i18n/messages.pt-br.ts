@@ -1,0 +1,117 @@
+import type { en } from './messages.en';
+
+/**
+ * Textos da interface em português do Brasil.
+ *
+ * Mantenha as mesmas chaves do inglês e os mesmos `{marcadores}`: o TypeScript e o teste
+ * tests/i18n.spec.ts avisam quando algo falta ou sobra.
+ * As variantes `_one` e `_other` são escolhidas pela quantidade (`count`).
+ */
+export const ptBR: Record<keyof typeof en, string> = {
+  'meta.description': 'Um assistente de escrita para redatores técnicos, com revisão pelo Vale',
+
+  'settings.title': 'Configurações',
+  'settings.open': 'Abrir configurações',
+  'settings.close': 'Fechar configurações',
+  'settings.styleGuide': 'Guia de estilo base',
+  'settings.styleGuideHelp': 'Conjunto principal de regras da revisão. Os guias verificam textos em inglês, e as mensagens também são em inglês.',
+  'settings.document': 'Documento',
+  'settings.uploadDocument': 'Enviar MD/MDX',
+  'settings.customRules': 'Regras personalizadas',
+  'settings.downloadExample': 'Baixar exemplo',
+  'settings.uploadRule': 'Enviar regra .yml',
+  'settings.removeRule': 'Remover a regra {name}',
+  'settings.drafts': 'Rascunhos',
+  'settings.saveDraft': 'Salvar meu rascunho neste navegador',
+  'settings.saveDraftHelp':
+    'O texto e as regras ficam neste aparelho e só saem dele para serem revisados. Desative em computadores compartilhados: isso também apaga o rascunho salvo.',
+  'settings.language': 'Language / Idioma',
+
+  'header.run': 'Revisar',
+  'header.running': 'Analisando…',
+  'header.runTitle': 'Revisar (Ctrl/⌘ + Enter)',
+  'header.toggleTheme': 'Alternar tema',
+
+  'status.notReviewed': 'Não revisado',
+  'status.reviewing': 'Revisando…',
+  'status.reviewedAt': 'Revisado às {time}',
+  'status.outOfDate': 'Desatualizado',
+
+  'editor.editor': 'Editor',
+  'editor.preview': 'Prévia',
+  'editor.alerts': 'Alertas',
+  'editor.chars_one': '{count} caractere',
+  'editor.chars_other': '{count} caracteres',
+  'editor.placeholder': 'Comece a escrever a documentação (Markdown é aceito)...',
+  'editor.ariaLabel': 'Texto do documento',
+  'editor.copy': 'Copiar conteúdo',
+  'editor.clear': 'Limpar editor',
+  'editor.confirmClear': 'Tem certeza de que quer limpar o editor?',
+  'editor.documentView': 'Modo do documento',
+  'editor.panels': 'Painéis',
+  'editor.documentRegion': 'Documento',
+  'preview.empty': '*A prévia aparece aqui...*',
+
+  'alerts.clear': 'Limpar',
+  'alerts.notReviewedTitle': 'Ainda não revisado',
+  'alerts.notReviewedDetail': 'Pressione {run} (Ctrl+Enter) para checar este documento com o guia {style}.',
+  'alerts.reviewingTitle': 'Revisando…',
+  'alerts.reviewingDetail': 'Checando o texto com o guia {style}.',
+  'alerts.noOpenTitle': 'Nenhum alerta em aberto',
+  'alerts.noOpenDetail': 'O documento mudou depois da última revisão. Use {run} de novo para confirmar.',
+  'alerts.noAlertsTitle_one': 'Nenhum alerta em {count} linha',
+  'alerts.noAlertsTitle_other': 'Nenhum alerta em {count} linhas',
+  'alerts.noAlertsDetail': 'Revisado às {time} com o guia {style}.',
+  'alerts.staleText':
+    'O texto mudou depois da última revisão. Os alertas acompanham suas edições, e os que você editou ficam marcados. Pressione {run} (Ctrl+Enter) para atualizar.',
+  'alerts.staleRules':
+    'O guia de estilo ou as regras personalizadas mudaram depois da última revisão. Pressione {run} (Ctrl+Enter) para atualizar.',
+  'alerts.edited': 'texto editado',
+  'alerts.styleGuide': 'Guia de estilo',
+  'alerts.styleGuideLabel': 'Abrir a página do guia de estilo para {rule}',
+
+  'severity.error': 'erro',
+  'severity.warning': 'aviso',
+  'severity.suggestion': 'sugestão',
+
+  'fix.replace': 'Substituir por “{value}”',
+  'fix.remove': 'Remover',
+  'fix.trim': 'Remover “{chars}”',
+  'fix.regex': 'Aplicar a edição sugerida',
+
+  'draft.saved': 'Salvo',
+  'draft.notSaved': 'Não salvo',
+  'draft.notSavedHelp':
+    'O navegador bloqueou ou lotou o armazenamento, então este rascunho só existe nesta aba. Copie o texto para um lugar seguro.',
+  'draft.off': 'Salvamento automático desligado',
+  'draft.restored': 'Rascunho restaurado de {when}.',
+  'draft.startFresh': 'Começar do zero',
+  'draft.confirmDiscard': 'Clique de novo para descartar',
+  'draft.dismiss': 'Dispensar',
+
+  'error.emptyText': 'Digite algum texto para revisar.',
+  'error.lintFailed': 'A revisão falhou: {message}',
+  'error.connection': 'Não foi possível conectar ao serviço de revisão.',
+  'error.unknown': 'Erro desconhecido',
+
+  'api.unsupported_media_type': 'A requisição precisa ser enviada como JSON.',
+  'api.forbidden': 'Requisições de outros sites não são permitidas.',
+  'api.rate_limited': 'Requisições demais. Espere {seconds} s e tente de novo.',
+  'api.busy': 'O serviço de revisão está ocupado. Tente de novo em alguns segundos.',
+  'api.timeout': 'A revisão passou de {seconds} s e foi interrompida. Revise um trecho menor.',
+  'api.output_too_large': 'Este texto gerou alertas demais para devolver. Revise um trecho menor.',
+  'api.body_too_large': 'A requisição é grande demais.',
+  'api.text_too_large': 'O texto é maior que {maxKb} KB. Revise um trecho menor.',
+  'api.text_required': 'Não há texto para revisar.',
+  'api.invalid_style': 'Esse guia de estilo não está disponível.',
+  'api.invalid_request': 'A requisição não é válida.',
+  'api.too_many_rules': 'Regras personalizadas demais. O máximo é {max}.',
+  'api.rule_too_large': 'A regra “{rule}” tem mais de {max} caracteres.',
+  'api.rule_invalid_yaml': 'A regra “{rule}” não é um YAML válido: {reason}',
+  'api.rule_not_mapping': 'A regra “{rule}” precisa ser um mapeamento YAML com a chave "extends".',
+  'api.rule_script': 'Regra “{rule}”: regras de script não são permitidas.',
+  'api.rule_extends': 'Regra “{rule}”: "extends" deve ser um destes: {allowed}.',
+  'api.vale_failed': 'Não foi possível executar o revisor. Tente de novo.',
+  'api.parse_failed': 'O revisor devolveu um resultado que não pôde ser lido.',
+  'api.internal': 'Algo deu errado no servidor. Tente de novo.',
+};
