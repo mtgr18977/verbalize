@@ -284,6 +284,15 @@ npx playwright show-report
 3. **Accessibility First**: All interactive elements include proper ARIA labels and keyboard navigation.
 4. **Single-Page Workshop**: Input (text editor) and output (diagnostics) are the primary focal points.
 
+### Visual Theme ("Diagnóstico")
+
+- Colors are semantic tokens defined in `app/globals.css` (`paper`, `sheet`, `ink`, `ink-2`, `rule`, `accent`, `err`, `warn`, `select`) and flip with the `.dark` class. Use `bg-sheet text-ink border-rule`, not `bg-gray-*` and not `dark:` variants.
+- Every text/background pair must keep a contrast ratio of at least 4.5:1 (checked in `tests/theme.spec.ts`).
+- Severity is never color-only: errors use a wavy underline, warnings a dashed one and suggestions a dotted one.
+- Corners are 2-3 px, there are no shadows or gradients, labels are sentence case and at least 12 px (`text-xs`), and animations must respect `prefers-reduced-motion`.
+- Fonts are Atkinson Hyperlegible Next (interface) and Atkinson Hyperlegible Mono (editor), loaded in `app/layout.tsx` with variables on `<html>`.
+- Alerts render as compiler-style diagnostics: severity, rule, position, the offending line and a `^^^` pointer. Tests find them with `data-testid="alert-card"`.
+
 ### Design Constraints
 
 - Documents up to 200 KB (`MAX_INPUT_SIZE`) are linted per request. Larger files must be linted in sections. Vale's run time grows faster than linearly with the number of alerts (measured: 25 KB of alert-dense text takes about 5 s, 100 KB about 66 s), so `LINT_TIMEOUT_MS` is what actually bounds CPU time.

@@ -39,11 +39,27 @@ interface PanelMessageProps {
   detail: string;
 }
 
+interface SeverityTone {
+  /** Text color of the label and of the ^^^ pointer */
+  text: string;
+  /** Underline shape: severity is readable without color */
+  decoration: string;
+}
+
+interface Snippet {
+  gutter: string;
+  code: string;
+  pointer: string;
+}
+
 const STYLE_OPTIONS = [
   { value: 'Google', label: 'Google Developer' },
   { value: 'Microsoft', label: 'Microsoft Writing' },
   { value: 'RedHat', label: 'Red Hat Style' },
 ] as const;
+
+const SNIPPET_CHARS_BEFORE = 30;
+const SNIPPET_CHARS_AFTER = 40;
 
 function subscribeNoop(): () => void {
   return () => {};
@@ -53,14 +69,45 @@ function getRulesKey(rules: CustomRule[]): string {
   return rules.map((rule) => `${rule.name}\u0000${rule.content}`).join('\u0001');
 }
 
+function getSeverityTone(severity: string): SeverityTone {
+  if (severity === 'error') return { text: 'text-err', decoration: 'decoration-wavy' };
+  if (severity === 'warning') return { text: 'text-warn', decoration: 'decoration-dashed' };
+  return { text: 'text-ink-2', decoration: 'decoration-dotted' };
+}
+
+/** Builds the compiler-style excerpt: the offending line with a ^^^ pointer under the match. */
+function buildSnippet(line: string, span: [number, number], lineNumber: number): Snippet {
+  const flat = line.replace(/\t/g, ' ');
+  // Vale spans are 1-based and inclusive
+  const startIndex = Math.max(0, span[0] - 1);
+  const endIndex = Math.min(flat.length, Math.max(startIndex + 1, span[1]));
+  const from = Math.max(0, startIndex - SNIPPET_CHARS_BEFORE);
+  const to = Math.min(flat.length, endIndex + SNIPPET_CHARS_AFTER);
+  const prefix = from > 0 ? '…' : '';
+  const suffix = to < flat.length ? '…' : '';
+
+  return {
+    gutter: String(lineNumber),
+    code: `${prefix}${flat.slice(from, to)}${suffix}`,
+    pointer: `${' '.repeat(prefix.length + startIndex - from)}${'^'.repeat(Math.max(1, endIndex - startIndex))}`,
+  };
+}
+
 function PanelMessage({ icon, title, detail }: PanelMessageProps): React.JSX.Element {
   return (
-    <div role="status" className="h-full flex flex-col items-center justify-center text-center px-6">
-      <div className="mb-4">{icon}</div>
-      <p className="text-sm font-bold text-gray-700 dark:text-gray-200">{title}</p>
-      <p className="mt-1 text-xs text-gray-600 dark:text-gray-400">{detail}</p>
+    <div role="status" className="p-6">
+      <p className="flex items-center gap-2 text-sm font-semibold text-ink">
+        {icon}
+        {title}
+      </p>
+      <p className="mt-2 text-sm text-ink-2 max-w-[34ch]">{detail}</p>
     </div>
   );
+}
+
+/** Label for the small column headers: sentence case, at least 12 px */
+function ColumnLabel({ children }: { children: React.ReactNode }): React.JSX.Element {
+  return <span className="text-xs font-semibold text-ink-2">{children}</span>;
 }
 
 export default function Home() {
@@ -81,7 +128,6 @@ export default function Home() {
   const docInputRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
-
 
   const handleLint = useCallback(async (): Promise<void> => {
     if (loading) return;
@@ -261,11 +307,15 @@ export default function Home() {
   const isAlertStale = (alert: ValeAlert): boolean =>
     textChanged && reviewedLines[alert.Line - 1] !== currentLines[alert.Line - 1];
 
+  const reviewTime = snapshot ? snapshot.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+  // Replaces the old "Live Editor" badge: the status always reflects the real state of the text
+  const statusLabel = loading ? 'Reviewing…' : snapshot === null ? 'Not reviewed' : isStale ? 'Out of date' : `Reviewed at ${reviewTime}`;
+
   const renderEmptyState = (): React.JSX.Element => {
     if (loading) {
       return (
         <PanelMessage
-          icon={<LoaderCircle className="w-8 h-8 text-blue-600 dark:text-blue-400 animate-spin" />}
+          icon={<LoaderCircle className="w-4 h-4 text-accent animate-spin motion-reduce:animate-none" />}
           title="Reviewing…"
           detail={`Checking the text against ${styleLabel}.`}
         />
@@ -274,7 +324,7 @@ export default function Home() {
     if (snapshot === null) {
       return (
         <PanelMessage
-          icon={<FileSearch className="w-8 h-8 text-gray-500 dark:text-gray-400" />}
+          icon={<FileSearch className="w-4 h-4 text-ink-2" />}
           title="Not reviewed yet"
           detail={`Press Run Linting (Ctrl+Enter) to check this document against ${styleLabel}.`}
         />
@@ -283,19 +333,18 @@ export default function Home() {
     if (isStale) {
       return (
         <PanelMessage
-          icon={<FileSearch className="w-8 h-8 text-gray-500 dark:text-gray-400" />}
+          icon={<FileSearch className="w-4 h-4 text-ink-2" />}
           title="The last review found no alerts"
           detail="The document changed since then, so this result no longer applies."
         />
       );
     }
     const lineCount = snapshot.text.split('\n').length;
-    const time = snapshot.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     return (
       <PanelMessage
-        icon={<Check className="w-8 h-8 text-green-600 dark:text-green-400" />}
+        icon={<Check className="w-4 h-4 text-accent" />}
         title={`No alerts in ${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`}
-        detail={`Reviewed at ${time} with ${styleLabel}.`}
+        detail={`Reviewed at ${reviewTime} with ${styleLabel}.`}
       />
     );
   };
@@ -304,48 +353,48 @@ export default function Home() {
     ? 'The text changed after the last review. Alerts on edited lines are marked. Press Run Linting (Ctrl+Enter) to refresh.'
     : 'The style guide or custom rules changed after the last review. Press Run Linting (Ctrl+Enter) to refresh.';
 
+  const secondaryButton =
+    'flex w-full items-center justify-center gap-2 border border-rule bg-transparent px-3 py-2 text-sm font-medium text-ink hover:border-ink-2 hover:bg-paper';
+  const iconButton = 'p-1.5 text-ink-2 hover:bg-select hover:text-ink';
+
   return (
-    <div className="flex h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 overflow-hidden font-sans">
+    <div className="flex h-screen overflow-hidden bg-paper font-sans text-ink">
       {/* Sidebar. `inert` keeps the hidden controls out of the tab order when it is collapsed. */}
       <aside
         inert={!sidebarOpen}
         aria-label="Settings"
-        className={`${sidebarOpen ? 'w-80' : 'w-0'} transition-all duration-300 ease-in-out bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col overflow-hidden shrink-0`}
+        className={`${sidebarOpen ? 'w-72' : 'w-0'} flex shrink-0 flex-col overflow-hidden border-r border-rule bg-sheet transition-[width] duration-200 motion-reduce:transition-none`}
       >
-        <div className="p-6 border-b border-gray-100 dark:border-gray-800 flex justify-between items-center">
-          <h2 className="font-bold text-xl text-blue-800 dark:text-blue-400 tracking-tight">Settings</h2>
-          <button onClick={() => setSidebarOpen(false)} aria-label="Close settings" className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
-            <X className="w-5 h-5" />
+        <div className="flex h-14 shrink-0 items-center justify-between border-b border-rule px-5">
+          <h2 className="text-base font-bold text-ink">Settings</h2>
+          <button onClick={() => setSidebarOpen(false)} aria-label="Close settings" className={iconButton}>
+            <X className="h-4 w-4" />
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar">
+        <div className="custom-scrollbar flex-1 space-y-7 overflow-y-auto p-5">
           {/* Style Guide Selection */}
-          <div className="space-y-3">
-            <label className="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest block">Base Style Guide</label>
+          <div className="space-y-2">
+            <label htmlFor="style-guide" className="block text-xs font-semibold text-ink-2">Base style guide</label>
             <select
+              id="style-guide"
               value={style}
               onChange={(e) => setStyle(e.target.value)}
-              className="w-full p-3 border border-gray-200 dark:border-gray-700 rounded-xl bg-gray-50 dark:bg-gray-800 focus:ring-2 focus:ring-blue-500 outline-none transition cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100"
+              className="w-full cursor-pointer border border-rule bg-paper px-3 py-2 text-sm font-medium text-ink"
             >
               {STYLE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </select>
-            <p className="text-[11px] text-gray-500 leading-relaxed italic">
-              Primary ruleset for validation.
-            </p>
+            <p className="text-xs text-ink-2">Primary ruleset for validation.</p>
           </div>
 
           {/* Document Upload */}
-          <div className="space-y-3">
-            <label className="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest block">Document</label>
-            <button
-              onClick={() => docInputRef.current?.click()}
-              className="w-full py-3 px-4 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400 rounded-xl font-bold hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-all flex items-center justify-center gap-2 group"
-            >
-              <FileText className="w-4 h-4 group-hover:scale-110 transition-transform" />
-              <span className="text-sm">Upload MD/MDX</span>
+          <div className="space-y-2">
+            <span className="block text-xs font-semibold text-ink-2">Document</span>
+            <button onClick={() => docInputRef.current?.click()} className={secondaryButton}>
+              <FileText className="h-4 w-4" />
+              <span>Upload MD/MDX</span>
             </button>
             <input
               type="file"
@@ -357,36 +406,37 @@ export default function Home() {
           </div>
 
           {/* Custom Rules */}
-          <div className="space-y-4">
-            <div className="flex justify-between items-center">
-              <label className="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Custom Rules</label>
+          <div className="space-y-2">
+            <div className="flex items-baseline justify-between">
+              <span className="text-xs font-semibold text-ink-2">Custom rules</span>
               <a
                 href="/example-style.yml"
                 download
-                className="text-[10px] font-bold text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 underline flex items-center gap-1"
+                className="text-xs font-medium text-accent underline underline-offset-2"
               >
-                <Upload className="w-3 h-3" />
-                Example
+                Download example
               </a>
             </div>
 
-            <div className="space-y-2">
-              {customRules.map((rule, idx) => (
-                <div key={idx} className="flex items-center justify-between p-2.5 bg-blue-50/50 dark:bg-blue-900/20 rounded-lg border border-blue-100/50 dark:border-blue-800/50">
-                  <span className="text-[11px] font-mono truncate mr-2 text-blue-700 dark:text-blue-400">{rule.name}</span>
-                  <button onClick={() => removeCustomRule(idx)} className="text-blue-300 hover:text-red-500 transition-colors">
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              ))}
-            </div>
+            {customRules.length > 0 && (
+              <ul className="border-t border-rule">
+                {customRules.map((rule, idx) => (
+                  <li key={idx} className="flex items-center justify-between border-b border-rule py-1.5">
+                    <span className="mr-2 truncate font-mono text-xs text-ink">{rule.name}</span>
+                    <button onClick={() => removeCustomRule(idx)} aria-label={`Remove rule ${rule.name}`} className="p-1 text-ink-2 hover:text-err">
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
 
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="w-full py-4 px-4 border-2 border-dashed border-gray-200 dark:border-gray-700 rounded-xl text-gray-400 dark:text-gray-500 hover:border-blue-400 hover:text-blue-500 transition-all flex flex-col items-center gap-2 group"
+              className="flex w-full items-center justify-center gap-2 border border-dashed border-ink-2 px-3 py-3 text-sm font-medium text-ink-2 hover:border-ink hover:text-ink"
             >
-              <Upload className="w-5 h-5 group-hover:scale-110 transition-transform" />
-              <span className="text-[10px] font-black uppercase tracking-widest">Upload .yml rule</span>
+              <Upload className="h-4 w-4" />
+              <span>Upload .yml rule</span>
             </button>
             <input
               type="file"
@@ -398,70 +448,70 @@ export default function Home() {
             />
           </div>
         </div>
-
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* Top Header */}
-        <header className="h-16 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between px-8 shrink-0">
-          <div className="flex items-center gap-4">
+        <header className="flex h-14 shrink-0 items-center justify-between border-b border-rule bg-sheet px-5">
+          <div className="flex items-center gap-3">
             {!sidebarOpen && (
-              <button onClick={() => setSidebarOpen(true)} aria-label="Open settings" className="p-2 text-gray-500 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
-                <Sidebar className="w-6 h-6" />
+              <button onClick={() => setSidebarOpen(true)} aria-label="Open settings" className={iconButton}>
+                <Sidebar className="h-5 w-5" />
               </button>
             )}
-            <h1 className="text-xl font-black text-gray-800 dark:text-gray-100 tracking-tight">
-              Writer<span className="text-blue-600">Assistant</span>
+            {/* The wavy underline is the universal "linter found something" mark */}
+            <h1 className="font-mono text-lg font-semibold text-ink underline decoration-err decoration-wavy decoration-[1.5px] underline-offset-[5px]">
+              verbalize
             </h1>
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
+            <span
+              data-testid="review-status"
+              className={`hidden font-mono text-xs sm:inline ${isStale ? 'font-semibold text-warn' : 'text-ink-2'}`}
+            >
+              {statusLabel}
+            </span>
             <button
               onClick={() => void handleLint()}
               disabled={loading}
               title="Run Linting (Ctrl/⌘ + Enter)"
-              className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg font-bold text-sm hover:bg-blue-700 disabled:bg-blue-800 disabled:cursor-wait transition-colors"
+              className="flex items-center gap-2 border border-accent bg-accent px-4 py-1.5 text-sm font-bold text-on-accent hover:bg-ink hover:border-ink disabled:cursor-wait disabled:bg-ink-2 disabled:border-ink-2"
             >
-              {loading ? <LoaderCircle className="animate-spin h-4 w-4" /> : <PlayCircle className="h-4 w-4" />}
+              {loading ? <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <PlayCircle className="h-4 w-4" />}
               <span>{loading ? 'Analyzing...' : 'Run Linting'}</span>
-              <kbd className="hidden md:inline text-[11px] font-mono text-blue-100">Ctrl ↵</kbd>
+              <kbd className="hidden font-mono text-xs font-normal md:inline">Ctrl ↵</kbd>
             </button>
             {mounted && (
               <button
                 onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}
-                className="p-2 rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+                className="border border-rule p-1.5 text-ink-2 hover:border-ink-2 hover:text-ink"
                 title="Toggle Theme"
+                aria-label="Toggle theme"
               >
-                {resolvedTheme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+                {resolvedTheme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
               </button>
             )}
-            <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-gray-100 dark:bg-gray-800 rounded-full">
-               <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-               <span className="text-[10px] font-black text-gray-500 dark:text-gray-400 uppercase tracking-widest">Live Editor</span>
-            </div>
           </div>
         </header>
 
         {/* 3-Column Grid */}
-        <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 overflow-hidden">
+        <div className="grid flex-1 grid-cols-1 overflow-hidden lg:grid-cols-3">
 
           {/* Column 1: Editor */}
-          <section className="flex flex-col border-r border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
-            <div className="h-12 px-6 flex items-center justify-between border-b border-gray-50 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50 shrink-0">
-              <div className="flex items-center gap-3">
-                <span className="text-[10px] font-black uppercase tracking-widest text-gray-400 dark:text-gray-500 flex items-center gap-2">
-                  <div className="w-1.5 h-1.5 rounded-full bg-blue-500"></div>
-                  Editor
-                </span>
-                <span className="text-[9px] bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded text-gray-500 dark:text-gray-400 font-mono italic">{text.length} chars</span>
+          <section className="flex flex-col overflow-hidden border-r border-rule bg-sheet">
+            <div className="flex h-10 shrink-0 items-center justify-between border-b border-rule bg-paper px-4">
+              <div className="flex items-baseline gap-3">
+                <ColumnLabel>Editor</ColumnLabel>
+                <span className="font-mono text-xs text-ink-2">{text.length} chars</span>
               </div>
               <div className="flex gap-1">
-                <button onClick={copyToClipboard} title="Copy Content" className={`p-1.5 rounded-md transition-colors ${copied ? 'text-green-500 bg-green-50 dark:bg-green-900/20' : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'}`}>
-                  {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                <button onClick={copyToClipboard} title="Copy Content" aria-label="Copy content" className={`${iconButton} ${copied ? 'text-accent' : ''}`}>
+                  {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
                 </button>
-                <button onClick={clearEditor} title="Clear All" className="p-1.5 rounded-md text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">
-                  <Trash2 className="w-4 h-4" />
+                <button onClick={clearEditor} title="Clear All" aria-label="Clear editor" className={`${iconButton} hover:text-err`}>
+                  <Trash2 className="h-4 w-4" />
                 </button>
               </div>
             </div>
@@ -470,25 +520,23 @@ export default function Home() {
               value={text}
               onChange={(e) => setText(e.target.value)}
               onScroll={handleScroll}
-              className="flex-1 p-8 outline-none resize-none font-mono text-sm leading-relaxed text-gray-700 dark:text-gray-200 bg-transparent custom-scrollbar"
+              aria-label="Document text"
+              className="custom-scrollbar flex-1 resize-none bg-transparent p-6 font-mono text-[14.5px] leading-7 text-ink placeholder:text-ink-2 focus-visible:outline-offset-[-2px]"
               placeholder="Start typing your documentation (Markdown supported)..."
             />
           </section>
 
           {/* Column 2: Preview */}
-          <section className="flex flex-col border-r border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
-            <div className="h-12 px-6 flex items-center border-b border-gray-50 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50 shrink-0">
-              <span className="text-[10px] font-black uppercase tracking-widest text-gray-400 dark:text-gray-500 flex items-center gap-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-green-500"></div>
-                Preview
-              </span>
+          <section className="flex flex-col overflow-hidden border-r border-rule bg-sheet">
+            <div className="flex h-10 shrink-0 items-center border-b border-rule bg-paper px-4">
+              <ColumnLabel>Preview</ColumnLabel>
             </div>
             <div
               ref={previewRef}
               onScroll={handleScroll}
-              className="flex-1 p-10 overflow-y-auto custom-scrollbar"
+              className="custom-scrollbar flex-1 overflow-y-auto p-8"
             >
-              <article className="prose prose-slate dark:prose-invert max-w-none prose-headings:font-black prose-headings:tracking-tight prose-a:text-blue-600 prose-img:rounded-xl">
+              <article className="prose prose-diagnostic max-w-none">
                 {/* ReactMarkdown is secure by default as it does not render HTML unless explicitly configured with rehype-raw */}
                 <ReactMarkdown>{text || '*Rich preview will appear here...*'}</ReactMarkdown>
               </article>
@@ -496,23 +544,22 @@ export default function Home() {
           </section>
 
           {/* Column 3: Results */}
-          <section className="flex flex-col bg-gray-50/30 dark:bg-gray-900/50 overflow-hidden">
-            <div className="h-12 px-6 flex items-center justify-between border-b border-gray-50 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50 shrink-0">
-              <span className="text-[10px] font-black uppercase tracking-widest text-gray-400 dark:text-gray-500 flex items-center gap-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-red-500"></div>
-                Linting Alerts
+          <section className="flex flex-col overflow-hidden bg-paper">
+            <div className="flex h-10 shrink-0 items-center justify-between border-b border-rule px-4">
+              <div className="flex items-baseline gap-2">
+                <ColumnLabel>Alerts</ColumnLabel>
                 {results.length > 0 && (
-                  <span className="bg-red-500 text-white px-1.5 py-0.5 rounded text-[8px] font-bold">{results.length}</span>
+                  <span className="font-mono text-xs font-semibold text-ink">{results.length}</span>
                 )}
-              </span>
+              </div>
               {results.length > 0 && (
-                <button onClick={() => { setResults([]); setSnapshot(null); }} className="text-[9px] font-bold text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 uppercase tracking-tighter">Clear</button>
+                <button onClick={() => { setResults([]); setSnapshot(null); }} className="text-xs font-medium text-accent underline underline-offset-2">Clear</button>
               )}
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+            <div className="custom-scrollbar flex-1 overflow-y-auto">
               {isStale && (
-                <div role="status" className="mb-3 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200">
+                <div role="status" className="flex items-start gap-2 border-b border-rule bg-sheet px-4 py-3 text-sm font-medium text-warn">
                   <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
                   <span>{staleMessage}</span>
                 </div>
@@ -520,76 +567,53 @@ export default function Home() {
               {results.length === 0 ? (
                 renderEmptyState()
               ) : (
-                <div className="space-y-3">
+                <ol>
                   {results.map((alert, index) => {
                     const stale = isAlertStale(alert);
+                    const tone = getSeverityTone(alert.Severity);
+                    const snippet = buildSnippet(reviewedLines[alert.Line - 1] ?? '', alert.Span, alert.Line);
                     return (
-                    <div
-                      key={index}
-                      onClick={stale ? undefined : (e) => handleAlertClick(alert, e)}
-                      className={`p-4 rounded-xl border bg-white dark:bg-gray-800 shadow-sm transition-all group ${
-                        stale ? 'border-dashed' : 'hover:scale-[1.01] hover:shadow-md hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer'
-                      } ${
-                        alert.Severity === 'error' ? 'border-red-100 dark:border-red-900/30' :
-                        alert.Severity === 'warning' ? 'border-yellow-100 dark:border-yellow-900/30' : 'border-blue-100 dark:border-blue-900/30'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between mb-2">
-                        <span className={`text-[8px] font-black uppercase px-2 py-0.5 rounded shadow-sm ${
-                          alert.Severity === 'error' ? 'bg-red-500 text-white' :
-                          alert.Severity === 'warning' ? 'bg-yellow-400 text-yellow-900' : 'bg-blue-500 text-white'
-                        }`}>
-                          {alert.Severity}
-                        </span>
-                        <span className="text-[10px] font-mono font-bold text-gray-500 dark:text-gray-400">{stale ? 'Line changed' : `Line ${alert.Line}`}</span>
-                      </div>
-                      <p className={`text-sm font-bold text-gray-800 dark:text-gray-200 leading-snug ${stale ? 'italic' : ''}`}>{alert.Message}</p>
-                      <div className="mt-3 pt-3 border-t border-gray-50 dark:border-gray-700 flex items-center justify-between">
-                        <span className="text-[9px] text-gray-400 dark:text-gray-500 font-bold uppercase tracking-tight">{alert.Check}</span>
+                      <li
+                        key={index}
+                        data-testid="alert-card"
+                        data-severity={alert.Severity}
+                        onClick={stale ? undefined : (e) => handleAlertClick(alert, e)}
+                        className={`border-b border-rule px-4 py-3 ${stale ? '' : 'cursor-pointer hover:bg-select'}`}
+                      >
+                        <div className="flex items-baseline gap-3 text-xs">
+                          <span className={`font-mono font-semibold underline decoration-[1.5px] underline-offset-4 ${tone.text} ${tone.decoration}`}>
+                            {alert.Severity}
+                          </span>
+                          <span className="min-w-0 truncate font-mono text-ink-2">{alert.Check}</span>
+                          <span className="ml-auto shrink-0 font-mono text-ink-2">
+                            {stale ? 'line changed' : `L${alert.Line}:${alert.Span[0]}`}
+                          </span>
+                        </div>
+                        <p className={`mt-1.5 text-sm leading-snug text-ink ${stale ? 'italic' : ''}`}>{alert.Message}</p>
+                        <pre className="custom-scrollbar mt-2 overflow-x-auto font-mono text-xs leading-5 text-ink-2">
+                          {`${snippet.gutter} │ ${snippet.code}\n${' '.repeat(snippet.gutter.length)} │ `}
+                          <span className={tone.text}>{snippet.pointer}</span>
+                        </pre>
                         {alert.Link && (
-                          <a href={alert.Link} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 transition-colors" title="View in Style Guide">
-                             <ExternalLink className="w-3.5 h-3.5" />
+                          <a
+                            href={alert.Link}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-accent underline underline-offset-2"
+                            aria-label={`Open the style guide page for ${alert.Check}`}
+                          >
+                            Style guide <ExternalLink className="h-3 w-3" />
                           </a>
                         )}
-                      </div>
-                    </div>
+                      </li>
                     );
                   })}
-                </div>
+                </ol>
               )}
             </div>
           </section>
         </div>
       </main>
-
-      <style jsx global>{`
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 4px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: #e2e8f0;
-          border-radius: 10px;
-        }
-        .dark .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: #334155;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: #cbd5e1;
-        }
-        .dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: #475569;
-        }
-        textarea::selection {
-          background-color: rgba(250, 204, 21, 0.4);
-          color: inherit;
-        }
-        .dark textarea::selection {
-          background-color: rgba(250, 204, 21, 0.5);
-        }
-      `}</style>
     </div>
   );
 }

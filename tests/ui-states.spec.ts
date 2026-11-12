@@ -26,11 +26,11 @@ test.describe('review states', () => {
   test('marks results as out of date when the text changes', async ({ page }) => {
     await page.goto('/');
     await runLint(page, WITH_ALERTS);
-    await expect(page.locator('.p-4.rounded-xl.border').first()).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId('alert-card').first()).toBeVisible({ timeout: 15000 });
 
     await page.locator('textarea').fill(WITH_ALERTS + ' Edited.');
     await expect(page.getByText(/The text changed after the last review/)).toBeVisible();
-    await expect(page.getByText('Line changed').first()).toBeVisible();
+    await expect(page.getByText('line changed').first()).toBeVisible();
 
     await page.getByRole('button', { name: /Run Linting/ }).click();
     await expect(page.getByText(/The text changed after the last review/)).toHaveCount(0);
@@ -46,7 +46,7 @@ test.describe('running a review', () => {
 
     await page.locator('textarea').fill(WITH_ALERTS);
     await page.locator('textarea').press('Control+Enter');
-    await expect(page.locator('.p-4.rounded-xl.border').first()).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId('alert-card').first()).toBeVisible({ timeout: 15000 });
   });
 
   test('controls inside the collapsed sidebar cannot receive focus', async ({ page }) => {

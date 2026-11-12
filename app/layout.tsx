@@ -1,21 +1,22 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Atkinson_Hyperlegible_Next, Atkinson_Hyperlegible_Mono } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "./components/ThemeProvider";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+// Both families are variable fonts designed for legibility; see globals.css for the theme tokens
+const interfaceFont = Atkinson_Hyperlegible_Next({
+  variable: "--font-ui",
   subsets: ["latin"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const editorFont = Atkinson_Hyperlegible_Mono({
+  variable: "--font-editor",
   subsets: ["latin"],
 });
 
 export const metadata: Metadata = {
-  title: "Writer Assistant",
-  description: "A professional writing assistant with Vale linting",
+  title: "Verbalize",
+  description: "A writing assistant for technical writers, with Vale linting",
 };
 
 export default function RootLayout({
@@ -24,10 +25,14 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
+    // The font variables live on <html>: Tailwind's default font-family is set there and
+    // cannot see variables declared on a descendant such as <body>.
+    <html
+      lang="en"
+      className={`${interfaceFont.variable} ${editorFont.variable}`}
+      suppressHydrationWarning
+    >
+      <body className="antialiased">
         <ThemeProvider
           attribute="class"
           defaultTheme="system"

@@ -22,7 +22,7 @@ test.describe('Writer Assistant', () => {
   });
 
   test('should have the correct title', async ({ page }) => {
-    await expect(page).toHaveTitle(/Writer Assistant/);
+    await expect(page).toHaveTitle(/Verbalize/);
   });
 
   test('should toggle dark mode correctly', async ({ page }) => {
@@ -50,7 +50,7 @@ test.describe('Writer Assistant', () => {
     await lintButton.click();
 
     // Wait for the results column to show alerts
-    const alertCards = page.locator('.p-4.rounded-xl.border');
+    const alertCards = page.getByTestId('alert-card');
     await expect(alertCards.first()).toBeVisible({ timeout: 15000 });
 
     const count = await alertCards.count();
