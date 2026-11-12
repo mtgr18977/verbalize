@@ -1,13 +1,13 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback, useMemo, useSyncExternalStore } from 'react';
-import ReactMarkdown from 'react-markdown';
 import { useTheme } from 'next-themes';
 import { Sun, Moon, Upload, Copy, Check, Trash2, Settings, PlayCircle, ExternalLink, FileText, FileSearch, LoaderCircle, TriangleAlert, X } from 'lucide-react';
 
 import { DraftStatusLabel, RestoredNotice } from '@/components/draft-status';
 import { AsciidocPreview } from '@/components/asciidoc-preview';
 import { LintEditor } from '@/components/lint-editor';
+import { MarkdownPreview } from '@/components/markdown-preview';
 import { useToast } from '@/components/toast';
 import { VocabularyDialog } from '@/components/vocabulary-dialog';
 import type { LintEditorHandle } from '@/components/lint-editor';
@@ -979,10 +979,7 @@ export default function Home() {
               {format === 'asciidoc' ? (
                 view === 'preview' && <AsciidocPreview source={text} />
               ) : (
-              <article className="prose prose-diagnostic">
-                {/* ReactMarkdown is secure by default as it does not render HTML unless explicitly configured with rehype-raw */}
-                <ReactMarkdown>{text || t('preview.empty')}</ReactMarkdown>
-              </article>
+                <MarkdownPreview source={text} />
               )}
             </div>
           </section>

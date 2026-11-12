@@ -215,7 +215,8 @@ body {
   font-family: var(--font-editor), ui-monospace, monospace;
   font-size: 0.875em;
 }
-.asciidoc-preview .preview-image {
+/* An image is never loaded in either preview: it is shown as its alt text */
+.preview-image {
   color: var(--ink-2);
   font-family: var(--font-editor), ui-monospace, monospace;
   font-size: 0.875em;
