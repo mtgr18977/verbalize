@@ -96,6 +96,97 @@ test.describe('the Markdown preview', () => {
   });
 });
 
+const LINKS = `# Links
+
+[web](https://docs.example.invalid/page) and [plain http](http://docs.example.invalid/old).
+
+[relative](other.md), [anchor](#links), [mail](mailto:someone@example.invalid), [script](javascript:window.__pwned=1),
+[data](data:text/html,<b>x</b>), [no scheme](//docs.example.invalid/x) and [empty]().
+
+Autolink: <https://docs.example.invalid/auto>
+`;
+
+test.describe('the links of the Markdown preview', () => {
+  test('a web link opens in a new tab, and the other kinds are plain text', async ({ page }) => {
+    await page.goto('/');
+    await setText(page, LINKS);
+    await openPreview(page);
+    const preview = page.locator('#panel-preview');
+
+    const links = preview.locator('a');
+    // web, plain http and the autolink: nothing else is a link
+    await expect(links).toHaveCount(3);
+    for (const link of await links.all()) {
+      await expect(link).toHaveAttribute('target', '_blank');
+      await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+      expect(await link.getAttribute('href')).toMatch(/^https?:\/\//);
+    }
+    // the others keep their text, so the sentence still reads
+    for (const text of ['relative', 'anchor', 'mail', 'script', 'data', 'no scheme', 'empty']) {
+      await expect(preview.getByText(text, { exact: true })).toBeVisible();
+      await expect(preview.getByRole('link', { name: text, exact: true })).toHaveCount(0);
+    }
+    expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
+  });
+
+  test('control: a link opened the usual way gives the new page access to this one', async ({ page, context }) => {
+    await context.route('https://docs.example.invalid/**', (route) =>
+      route.fulfill({ contentType: 'text/html', body: '<h1>target</h1>' })
+    );
+    await page.goto('/');
+    const [popup] = await Promise.all([
+      page.waitForEvent('popup'),
+      page.evaluate(() => window.open('https://docs.example.invalid/page', '_blank')),
+    ]);
+    await popup.waitForLoadState();
+    // without noopener the other page can reach back: this is what the link attributes prevent
+    expect(await popup.evaluate(() => window.opener !== null)).toBe(true);
+  });
+
+  test('the new tab cannot reach the editor and is not told where the reader came from', async ({ page, context }) => {
+    const referers: Array<string | undefined> = [];
+    await context.route('https://docs.example.invalid/**', (route) => {
+      referers.push(route.request().headers()['referer']);
+      return route.fulfill({ contentType: 'text/html', body: '<h1>target</h1>' });
+    });
+    await page.goto('/');
+    await setText(page, '[web](https://docs.example.invalid/page)');
+    await openPreview(page);
+    const editorUrl = page.url();
+
+    const [popup] = await Promise.all([
+      page.waitForEvent('popup'),
+      page.locator('#panel-preview').getByRole('link', { name: 'web' }).click(),
+    ]);
+    await popup.waitForLoadState();
+    await expect(popup.getByRole('heading', { name: 'target' })).toBeVisible();
+
+    expect(await popup.evaluate(() => window.opener)).toBeNull();
+    expect(referers).toEqual([undefined]);
+    // the editor stayed where it was, with its text
+    expect(page.url()).toBe(editorUrl);
+    await expect(page.locator('#panel-preview')).toBeVisible();
+  });
+
+  test('a link around an image still works, and shows the description of the image', async ({ page }) => {
+    await page.goto('/');
+    await setText(page, `[![Badge](https://${HOST}/badge.svg)](https://docs.example.invalid/page)`);
+    await openPreview(page);
+    const link = page.locator('#panel-preview').getByRole('link', { name: '[image: Badge]' });
+    await expect(link).toHaveAttribute('href', 'https://docs.example.invalid/page');
+    await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
+  test('links keep their look in the theme', async ({ page }) => {
+    await page.goto('/');
+    await setText(page, '[web](https://docs.example.invalid/page)');
+    await openPreview(page);
+    const link = page.locator('#panel-preview').getByRole('link', { name: 'web' });
+    await expect(link).toHaveCSS('text-decoration-line', 'underline');
+    await expect(link).toHaveCSS('color', /rgb\(11, 94, 110\)/);
+  });
+});
+
 test.describe('in Portuguese', () => {
   test.use({ locale: 'pt-BR' });
 
