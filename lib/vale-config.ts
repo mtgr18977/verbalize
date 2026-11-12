@@ -1,3 +1,5 @@
+import { getFileExtension } from '@/lib/document-format';
+import type { DocumentFormat } from '@/lib/document-format';
 import { hasTerms } from '@/lib/vocabulary';
 import type { Vocabulary } from '@/types/vocabulary';
 
@@ -7,6 +9,7 @@ export const VOCABULARY_NAME = 'Project';
 interface ValeConfigOptions {
   stylesPath: string;
   style: string;
+  format: DocumentFormat;
   /** Whether a "Custom" style with the user's uploaded rules exists. */
   hasCustomRules: boolean;
   vocabulary: Vocabulary;
@@ -19,7 +22,7 @@ interface ValeConfigOptions {
  * user has a vocabulary or asked for spelling, so nobody gets new alerts they did not ask for.
  * Repetition is always off: it has nothing to do with a vocabulary.
  */
-export function buildValeIni({ stylesPath, style, hasCustomRules, vocabulary }: ValeConfigOptions): string {
+export function buildValeIni({ stylesPath, style, format, hasCustomRules, vocabulary }: ValeConfigOptions): string {
   const withTerms = hasTerms(vocabulary);
   const useBuiltIn = withTerms || vocabulary.spelling;
 
@@ -29,7 +32,8 @@ export function buildValeIni({ stylesPath, style, hasCustomRules, vocabulary }: 
 
   const lines = ['StylesPath = ' + stylesPath, 'MinAlertLevel = suggestion'];
   if (withTerms) lines.push(`Vocab = ${VOCABULARY_NAME}`);
-  lines.push('[*.md]', `BasedOnStyles = ${styles.join(', ')}`);
+  // The section must match the extension of the file Vale reads: that is how it picks the parser
+  lines.push(`[*.${getFileExtension(format)}]`, `BasedOnStyles = ${styles.join(', ')}`);
 
   if (useBuiltIn) {
     lines.push('Vale.Repetition = NO');

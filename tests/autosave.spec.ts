@@ -304,10 +304,11 @@ test.describe('reading what is stored', () => {
   });
 
   test('parsePrefs defaults to autosave on', () => {
-    expect(parsePrefs(null)).toEqual({ autosave: true, style: null });
-    expect(parsePrefs('garbage')).toEqual({ autosave: true, style: null });
-    expect(parsePrefs('[1]')).toEqual({ autosave: true, style: null });
-    expect(parsePrefs(JSON.stringify({ autosave: false, style: 'RedHat' }))).toEqual({ autosave: false, style: 'RedHat' });
-    expect(parsePrefs(JSON.stringify({ style: 3 }))).toEqual({ autosave: true, style: null });
+    expect(parsePrefs(null)).toEqual({ autosave: true, style: null, format: null });
+    expect(parsePrefs('garbage')).toEqual({ autosave: true, style: null, format: null });
+    expect(parsePrefs('[1]')).toEqual({ autosave: true, style: null, format: null });
+    expect(parsePrefs(JSON.stringify({ autosave: false, style: 'RedHat', format: 'asciidoc' }))).toEqual({ autosave: false, style: 'RedHat', format: 'asciidoc' });
+    expect(parsePrefs(JSON.stringify({ format: 'rst' }))).toEqual({ autosave: true, style: null, format: null });
+    expect(parsePrefs(JSON.stringify({ style: 3 }))).toEqual({ autosave: true, style: null, format: null });
   });
 });

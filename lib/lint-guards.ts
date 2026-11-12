@@ -1,6 +1,8 @@
 import { parse as parseYaml } from 'yaml';
 
 import type { ApiErrorCode, ApiErrorParams } from '@/lib/api-errors';
+import { DEFAULT_FORMAT, isDocumentFormat } from '@/lib/document-format';
+import type { DocumentFormat } from '@/lib/document-format';
 import { EMPTY_VOCABULARY } from '@/types/vocabulary';
 import type { Vocabulary } from '@/types/vocabulary';
 import { MAX_VOCABULARY_TERMS, MAX_VOCABULARY_TERM_LENGTH, normalizeTerms } from '@/lib/vocabulary';
@@ -64,6 +66,7 @@ export interface CustomRule {
 export interface LintRequest {
   text: string;
   style: AllowedStyle;
+  format: DocumentFormat;
   customRules: CustomRule[];
   vocabulary: Vocabulary;
 }
@@ -187,7 +190,7 @@ export function parseLintRequest(body: unknown): LintRequest {
     throw new RequestError('Request body must be a JSON object', 400, 'invalid_request');
   }
 
-  const { text, style, customRules, vocabulary } = body;
+  const { text, style, customRules, vocabulary, format } = body;
 
   if (typeof text !== 'string' || text.length === 0) {
     throw new RequestError('No text provided or invalid format', 400, 'text_required');
@@ -202,6 +205,10 @@ export function parseLintRequest(body: unknown): LintRequest {
   }
   if (typeof style !== 'string' || !(ALLOWED_STYLES as readonly string[]).includes(style)) {
     throw new RequestError('Invalid style guide selected', 400, 'invalid_style');
+  }
+
+  if (format !== undefined && format !== null && !isDocumentFormat(format)) {
+    throw new RequestError('Invalid document format selected', 400, 'invalid_format');
   }
 
   const rules: CustomRule[] = [];
@@ -232,7 +239,13 @@ export function parseLintRequest(body: unknown): LintRequest {
     }
   }
 
-  return { text, style: style as AllowedStyle, customRules: rules, vocabulary: parseVocabulary(vocabulary) };
+  return {
+    text,
+    style: style as AllowedStyle,
+    format: isDocumentFormat(format) ? format : DEFAULT_FORMAT,
+    customRules: rules,
+    vocabulary: parseVocabulary(vocabulary),
+  };
 }
 
 /** Reads the request body as text, aborting as soon as it grows past the limit. */

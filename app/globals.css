@@ -144,3 +144,79 @@ body {
 .prose-diagnostic :where(a) {
   text-underline-offset: 3px;
 }
+
+/*
+ * AsciiDoc preview. Asciidoctor emits plain structural HTML (no stylesheet is loaded), so the few
+ * constructs the typography plugin does not know are styled here with the theme tokens.
+ */
+.asciidoc-preview .title {
+  margin: 1.25rem 0 0.25rem;
+  font-weight: 700;
+}
+.asciidoc-preview .admonitionblock > table {
+  width: 100%;
+  margin: 1.25rem 0;
+  border-collapse: collapse;
+  border-left: 3px solid var(--accent);
+  background: var(--paper);
+}
+.asciidoc-preview .admonitionblock td {
+  padding: 0.625rem 1rem;
+  vertical-align: top;
+  border: 0;
+}
+.asciidoc-preview .admonitionblock td.icon {
+  width: 1%;
+  white-space: nowrap;
+}
+.asciidoc-preview .admonitionblock td.icon .title {
+  margin: 0;
+  color: var(--accent);
+}
+.asciidoc-preview .admonitionblock.warning > table,
+.asciidoc-preview .admonitionblock.caution > table,
+.asciidoc-preview .admonitionblock.important > table {
+  border-left-color: var(--warn);
+}
+.asciidoc-preview .admonitionblock.warning td.icon .title,
+.asciidoc-preview .admonitionblock.caution td.icon .title,
+.asciidoc-preview .admonitionblock.important td.icon .title {
+  color: var(--warn);
+}
+.asciidoc-preview .exampleblock > .content,
+.asciidoc-preview .sidebarblock > .content {
+  margin: 1.25rem 0;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--rule);
+}
+.asciidoc-preview .toc {
+  margin: 1rem 0;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+}
+.asciidoc-preview .toc ul {
+  margin: 0.25rem 0;
+}
+.asciidoc-preview table.tableblock {
+  width: 100%;
+}
+.asciidoc-preview table.tableblock th,
+.asciidoc-preview table.tableblock td {
+  padding: 0.375rem 0.75rem;
+  border: 1px solid var(--rule);
+  text-align: left;
+}
+.asciidoc-preview kbd {
+  padding: 0 0.3em;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  background: var(--paper);
+  font-family: var(--font-editor), ui-monospace, monospace;
+  font-size: 0.875em;
+}
+.asciidoc-preview .preview-image {
+  color: var(--ink-2);
+  font-family: var(--font-editor), ui-monospace, monospace;
+  font-size: 0.875em;
+}

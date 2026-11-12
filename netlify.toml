@@ -3,5 +3,5 @@
   publish = ".next"
 
 [functions]
-  # Ensure the vale binary and styles are included in the serverless function bundle
-  included_files = ["vale", "styles/**"]
+  # Ensure the vale binary, the styles and the AsciiDoc stand-in (with its package) are included in the serverless function bundle
+  included_files = ["vale", "styles/**", "scripts/bin/**", "node_modules/@asciidoctor/core/**"]

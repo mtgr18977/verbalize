@@ -19,6 +19,8 @@ import type { Action, Diagnostic } from '@codemirror/lint';
 import { tags } from '@lezer/highlight';
 import { GFM, parser as markdownParser } from '@lezer/markdown';
 
+import { asciidoc } from '@/components/asciidoc-language';
+import type { DocumentFormat } from '@/lib/document-format';
 import type { AlertPosition, ReviewAlert } from '@/types/lint';
 import { useI18n } from '@/i18n/provider';
 import { describeFix, getAlertFixes } from '@/lib/vale-fixes';
@@ -47,6 +49,8 @@ interface LintEditorProps {
   onFixApplied: (id: number) => void;
   /** The user chose to accept the word of a spelling alert into the project vocabulary. */
   onAcceptTerm: (id: number) => void;
+  /** Decides the syntax highlighting. */
+  format: DocumentFormat;
   placeholderText: string;
   ariaLabel: string;
   className?: string;
@@ -143,7 +147,12 @@ const markdownSupport = new LanguageSupport(
   new Language(defineLanguageFacet(), markdownParser.configure(GFM), [], 'markdown')
 );
 
+function languageFor(format: DocumentFormat): Extension {
+  return format === 'asciidoc' ? asciidoc() : markdownSupport;
+}
+
 const markdownHighlight = HighlightStyle.define([
+  { tag: tags.comment, color: 'var(--ink-2)', fontStyle: 'italic' },
   { tag: tags.heading, fontWeight: '700', color: 'var(--ink)' },
   { tag: tags.strong, fontWeight: '700' },
   { tag: tags.emphasis, fontStyle: 'italic' },
@@ -193,7 +202,7 @@ function runFix(view: EditorView, from: number, to: number, fix: Fix): void {
 }
 
 export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function LintEditor(
-  { value, onChange, alerts, reviewedText, onPositionsChange, onFixApplied, onAcceptTerm, placeholderText, ariaLabel, className },
+  { value, onChange, alerts, reviewedText, onPositionsChange, onFixApplied, onAcceptTerm, format, placeholderText, ariaLabel, className },
   ref
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -205,6 +214,7 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
   const alertIdsRef = useRef(new WeakMap<Diagnostic, number>());
   const alertsByIdRef = useRef(new Map<number, ReviewAlert>());
   // Text that depends on the language lives in compartments, so it can change without a new editor
+  const languageCompartmentRef = useRef(new Compartment());
   const placeholderCompartmentRef = useRef(new Compartment());
   const attributesCompartmentRef = useRef(new Compartment());
 
@@ -326,7 +336,7 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
           highlightActiveLine(),
           highlightActiveLineGutter(),
           EditorView.lineWrapping,
-          markdownSupport,
+          languageCompartmentRef.current.of(languageFor(format)),
           syntaxHighlighting(markdownHighlight),
           placeholderCompartmentRef.current.of(placeholder(placeholderText)),
           theme,
@@ -401,6 +411,11 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
     lastPositionsRef.current = positions;
     callbacksRef.current.onPositionsChange(positions);
   }, [alerts, reviewedText, buildDiagnostic, collectPositions]);
+
+  // The document format changed: highlight it as the right markup
+  useEffect(() => {
+    viewRef.current?.dispatch({ effects: languageCompartmentRef.current.reconfigure(languageFor(format)) });
+  }, [format]);
 
   // The language changed: reword the placeholder, the accessible name and the fixes in the tooltips.
   // The diagnostics are rebuilt where they are now, so alerts keep their tracked positions.

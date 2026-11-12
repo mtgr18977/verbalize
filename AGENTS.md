@@ -34,6 +34,8 @@ verbalize/
 │   ├── layout.tsx                # Root layout component
 │   └── page.tsx                  # Main application interface
 ├── components/
+│   ├── asciidoc-language.ts      # AsciiDoc highlighting for the editor (small stream parser)
+│   ├── asciidoc-preview.tsx      # AsciiDoc preview, built in the browser on demand
 │   ├── draft-status.tsx          # "Saved" label and the restored-draft notice
 │   ├── lint-editor.tsx           # CodeMirror 6 editor with Vale diagnostics
 │   └── vocabulary-dialog.tsx     # Editor of the project vocabulary (native <dialog>)
@@ -49,7 +51,10 @@ verbalize/
 ├── lib/
 │   ├── draft-storage.ts          # Defensive localStorage helpers and draft parsing
 │   ├── api-errors.ts             # Error codes of /api/lint, shared with the interface
+│   ├── asciidoc-html.ts          # Sanitizes the HTML of the AsciiDoc preview
+│   ├── document-format.ts        # Markdown / AsciiDoc: detection, extensions
 │   ├── lint-guards.ts            # Limits and request guards for /api/lint
+│   ├── run-process.ts            # Runs a command with limits and kills its whole process group
 │   ├── vale-config.ts            # Builds the .vale.ini of one request
 │   ├── vocabulary.ts             # Escaping, validation, import and files of the project vocabulary
 │   ├── vale-fixes.ts             # One-click fixes derived from Vale's `Action`
@@ -62,6 +67,7 @@ verbalize/
 │   ├── Microsoft/                # Microsoft Writing Style Guide
 │   └── RedHat/                   # Red Hat Documentation Style Guide
 ├── scripts/
+│   ├── bin/asciidoctor           # Node stand-in for the `asciidoctor` command Vale runs for AsciiDoc
 │   └── install-vale.js           # Vale binary installation script
 ├── tests/
 │   └── *.spec.ts                 # Playwright E2E test specifications
@@ -358,6 +364,16 @@ npx playwright show-report
 - Limits (`MAX_VOCABULARY_TERMS` 500 per list, 80 characters per term) come from timing Vale: its cost follows the number of terms, not the size of the document (500 terms ~0.5 s, 1000 ~1.4 s, 3000 ~8.5 s). The API answers `vocabulary_invalid`, `vocabulary_too_many` and `vocabulary_term_too_long`.
 - Import reads Verbalize's own files back and skips lines with real regular expression syntax (reporting them), rather than turning them into literals that would never match what their author meant.
 - The vocabulary is stored under `verbalize:vocabulary:v1` and follows the autosave switch like the draft; "Start fresh" keeps it, because it is configuration. Changing it after a review marks the result out of date.
+
+### AsciiDoc
+
+- A document is Markdown or AsciiDoc. The format is sent with every review (`format`, default `markdown`), decides the extension of the temporary file (`doc.md` or `doc.adoc`) and therefore the `[*.md]` or `[*.adoc]` section of the generated `.vale.ini` (`lib/vale-config.ts`), and is kept as a preference. Uploading a file picks the format from its extension (`detectFormat`); other extensions keep the current one. Changing it after a review makes the result out of date.
+- Vale reads AsciiDoc by running `asciidoctor -s -a notitle! -a attribute-missing=drop --safe-mode secure -`, with the document on stdin. That command is Ruby and does not exist on serverless platforms, so `scripts/bin/asciidoctor` is a Node stand-in on top of Asciidoctor.js, put first in the `PATH` of the Vale process. Measured with Vale 3.9.5 on a realistic document, Vale gives the same alerts at the same lines and columns with it as with the Ruby original (Google and Red Hat styles). It starts in about 0.1 s and converts 250 KB in about 0.4 s. Asciidoctor.js 4 is asynchronous: `convert` returns a promise.
+- **Security.** The stand-in converts in secure safe mode whatever its arguments say, and ignores every flag except attributes, `-s` and `-`. Without secure mode, `include::/some/file[]` would read the file from the server and the contents would come back in the alerts; `tests/asciidoc.spec.ts` proves that with a control experiment and proves the stand-in does not. Never let a user-controlled value reach its arguments.
+- `lib/run-process.ts` runs Vale in its own process group and kills the whole group when time or output runs out, because Vale starts `asciidoctor` and killing only Vale would leave that helper running. When testing that a process is gone, read its state in `/proc`: a killed process stays a zombie, and `kill(pid, 0)` still answers for it.
+- Deployment: the stand-in and `@asciidoctor/core` are used at run time but never imported, so `next.config.ts` (`outputFileTracingIncludes`) and `netlify.toml` (`included_files`) list them, together with `vale` and `styles`. Keep both lists in sync. AsciiDoc review is not available on Windows (the stand-in is a script with a shebang): the API answers `asciidoc_unavailable`.
+- Preview: `components/asciidoc-preview.tsx` loads Asciidoctor.js (~100 KB gzip) and DOMPurify (~11 KB) the first time an AsciiDoc preview is opened, not before, and converts in secure mode. The HTML is never trusted (AsciiDoc passthrough blocks let raw HTML through): `lib/asciidoc-html.ts` removes scripts, frames, forms, SVG, MathML, stylesheets and inline styles, replaces every image with its alt text (a remote image would reveal the reader's address to the author), keeps only web links (external ones open with `rel="noopener noreferrer"`), and prefixes every id with `adoc-` so a document cannot take the place of an id of the page.
+- The editor highlights AsciiDoc with a small line-oriented parser (titles, delimited blocks, attributes, lists, admonitions, inline marks). It is not a grammar: Asciidoctor reads the document and Vale reports from its output.
 
 ### Design Constraints
 

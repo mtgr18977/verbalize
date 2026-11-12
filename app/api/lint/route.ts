@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
@@ -19,19 +17,11 @@ import {
 } from '@/lib/lint-guards';
 import type { CustomRule, LintRequest } from '@/lib/lint-guards';
 import type { ApiErrorBody } from '@/lib/api-errors';
+import { getFileExtension } from '@/lib/document-format';
+import { runProcess } from '@/lib/run-process';
 import { VOCABULARY_NAME, buildValeIni } from '@/lib/vale-config';
 import { buildVocabularyFiles, hasTerms } from '@/lib/vocabulary';
 import type { Vocabulary } from '@/types/vocabulary';
-
-const execFileAsync = promisify(execFile);
-
-interface ExecError extends Error {
-  code?: string | number;
-  killed?: boolean;
-  signal?: string | null;
-  stdout?: string;
-  stderr?: string;
-}
 
 type ValeOutput = Record<string, unknown[]>;
 
@@ -98,8 +88,34 @@ async function writeStyles(tmpDir: string, customRules: CustomRule[], vocabulary
   return true;
 }
 
+/**
+ * Vale reads AsciiDoc by running `asciidoctor`, which is Ruby and is not there on serverless
+ * platforms. scripts/bin/asciidoctor is a stand-in written for Node (see that file): it is put first
+ * in PATH so Vale finds it, whatever else the machine has. Measured on a realistic document, Vale
+ * gives the same alerts at the same positions with it as with the Ruby original.
+ */
+const ASCIIDOC_BIN_DIR = path.join(process.cwd(), 'scripts', 'bin');
+const ASCIIDOC_COMMAND = path.join(ASCIIDOC_BIN_DIR, 'asciidoctor');
+
+async function isAsciidocAvailable(): Promise<boolean> {
+  // The stand-in is a script with a shebang: there is no way to run it on Windows
+  if (process.platform === 'win32') return false;
+  try {
+    // Serverless deployments may not preserve the executable bit
+    await fs.chmod(ASCIIDOC_COMMAND, 0o755).catch(() => undefined);
+    await fs.access(ASCIIDOC_COMMAND, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function runVale(tmpDir: string, request: LintRequest): Promise<unknown[]> {
-  const tmpFile = path.join(tmpDir, 'doc.md');
+  if (request.format === 'asciidoc' && !(await isAsciidocAvailable())) {
+    throw new RequestError('AsciiDoc support is not available on this server', 503, 'asciidoc_unavailable');
+  }
+
+  const tmpFile = path.join(tmpDir, `doc.${getFileExtension(request.format)}`);
   await fs.writeFile(tmpFile, request.text);
 
   const hasCustomRules = await writeStyles(tmpDir, request.customRules, request.vocabulary);
@@ -109,6 +125,7 @@ async function runVale(tmpDir: string, request: LintRequest): Promise<unknown[]>
     buildValeIni({
       stylesPath: path.join(tmpDir, 'styles'),
       style: request.style,
+      format: request.format,
       hasCustomRules,
       vocabulary: request.vocabulary,
     })
@@ -123,48 +140,43 @@ async function runVale(tmpDir: string, request: LintRequest): Promise<unknown[]>
     console.warn('Could not chmod vale binary:', err);
   }
 
-  const parse = (stdout: string): unknown[] => {
-    const results = JSON.parse(stdout) as ValeOutput;
-    return results[tmpFile] ?? [];
-  };
+  const result = await runProcess(valePath, [`--config=${iniFile}`, '--output=JSON', tmpFile], {
+    cwd: tmpDir,
+    // Vale does not need the server's environment (tokens, cloud credentials, ...). Its helpers do
+    // need node (the AsciiDoc stand-in is a Node script), so the folder of this node comes along.
+    env: {
+      PATH: [ASCIIDOC_BIN_DIR, path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter),
+      HOME: tmpDir,
+      NODE_ENV: process.env.NODE_ENV,
+    },
+    timeoutMs: LINT_TIMEOUT_MS,
+    maxOutputBytes: MAX_VALE_OUTPUT_BYTES,
+  });
 
-  try {
-    const { stdout } = await execFileAsync(valePath, [`--config=${iniFile}`, '--output=JSON', tmpFile], {
-      cwd: tmpDir,
-      // Vale does not need the server's environment (tokens, cloud credentials, ...)
-      env: { PATH: process.env.PATH ?? '', HOME: tmpDir, NODE_ENV: process.env.NODE_ENV },
-      timeout: LINT_TIMEOUT_MS,
-      killSignal: 'SIGKILL',
-      maxBuffer: MAX_VALE_OUTPUT_BYTES,
-    });
-    return parse(stdout);
-  } catch (error: unknown) {
-    const execError = error as ExecError;
-
-    if (execError.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
-      throw new RequestError('This text produced too many alerts to return. Lint a shorter section.', 413, 'output_too_large');
-    }
-    if (execError.killed || execError.signal === 'SIGKILL') {
-      throw new RequestError(
-        `Linting took longer than ${Math.round(LINT_TIMEOUT_MS / 1000)} s and was stopped. Lint a shorter section.`,
-        504,
-        'timeout',
-        { params: { seconds: Math.round(LINT_TIMEOUT_MS / 1000) } }
-      );
-    }
-
-    // Vale exits with a non-zero code when it finds alerts, but still prints valid JSON
-    if (execError.stdout) {
-      try {
-        return parse(execError.stdout);
-      } catch {
-        throw new RequestError('Failed to parse Vale output', 500, 'parse_failed');
-      }
-    }
-
-    console.error('Vale execution failed:', execError.stderr?.slice(0, 500) || execError.message);
-    throw new RequestError('Vale execution failed', 500, 'vale_failed');
+  if (result.outputTooLarge) {
+    throw new RequestError('This text produced too many alerts to return. Lint a shorter section.', 413, 'output_too_large');
   }
+  if (result.timedOut) {
+    throw new RequestError(
+      `Linting took longer than ${Math.round(LINT_TIMEOUT_MS / 1000)} s and was stopped. Lint a shorter section.`,
+      504,
+      'timeout',
+      { params: { seconds: Math.round(LINT_TIMEOUT_MS / 1000) } }
+    );
+  }
+
+  // Vale exits with a non-zero code when it finds alerts, but still prints valid JSON
+  if (result.stdout.trim().length > 0) {
+    try {
+      const results = JSON.parse(result.stdout) as ValeOutput;
+      return results[tmpFile] ?? [];
+    } catch {
+      throw new RequestError('Failed to parse Vale output', 500, 'parse_failed');
+    }
+  }
+
+  console.error('Vale execution failed:', result.spawnError?.message ?? result.stderr.slice(0, 500));
+  throw new RequestError('Vale execution failed', 500, 'vale_failed');
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {

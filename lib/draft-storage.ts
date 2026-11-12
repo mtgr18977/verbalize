@@ -1,3 +1,5 @@
+import { isDocumentFormat } from '@/lib/document-format';
+import type { DocumentFormat } from '@/lib/document-format';
 import { parseStoredVocabulary } from '@/lib/vocabulary';
 import type { CustomRule } from '@/types/lint';
 import { EMPTY_VOCABULARY } from '@/types/vocabulary';
@@ -27,6 +29,8 @@ export interface StoredDraft {
 export interface StoredPrefs {
   autosave: boolean;
   style: string | null;
+  /** The format of the document last worked on, so AsciiDoc writers do not have to pick it every time. */
+  format: DocumentFormat | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -58,7 +62,7 @@ export function parseDraft(raw: string | null): StoredDraft | null {
 
 /** Autosave is on unless the user turned it off. */
 export function parsePrefs(raw: string | null): StoredPrefs {
-  const fallback: StoredPrefs = { autosave: true, style: null };
+  const fallback: StoredPrefs = { autosave: true, style: null, format: null };
   if (!raw) return fallback;
   try {
     const value: unknown = JSON.parse(raw);
@@ -66,6 +70,7 @@ export function parsePrefs(raw: string | null): StoredPrefs {
     return {
       autosave: value.autosave !== false,
       style: typeof value.style === 'string' ? value.style : null,
+      format: isDocumentFormat(value.format) ? value.format : null,
     };
   } catch {
     return fallback;

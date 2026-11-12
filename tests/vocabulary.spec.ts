@@ -121,7 +121,7 @@ test.describe('what is stored', () => {
 });
 
 test.describe('the Vale configuration', () => {
-  const base = { stylesPath: '/s', style: 'Google', hasCustomRules: false };
+  const base = { stylesPath: '/s', style: 'Google', format: 'markdown' as const, hasCustomRules: false };
 
   test('without a vocabulary nothing changes: no built-in Vale style, no vocabulary', () => {
     expect(buildValeIni({ ...base, vocabulary: EMPTY_VOCABULARY })).toBe(

@@ -14,6 +14,7 @@ import {
   savePrefs,
   saveVocabulary,
 } from '@/lib/draft-storage';
+import type { DocumentFormat } from '@/lib/document-format';
 import type { Vocabulary } from '@/types/vocabulary';
 
 /** Wait this long after the last edit before writing, so typing does not hit storage per key. */
@@ -30,6 +31,8 @@ export interface RestoredDraft {
   customRules: CustomRule[];
   /** The style guide chosen last time, if any. */
   style: string | null;
+  /** The format last used, if any. */
+  format: DocumentFormat | null;
   /** The project vocabulary. Restored without a notice: it is configuration, not a draft. */
   vocabulary: Vocabulary | null;
 }
@@ -37,6 +40,7 @@ export interface RestoredDraft {
 interface UseDraftAutosaveOptions {
   text: string;
   style: string;
+  format: DocumentFormat;
   customRules: CustomRule[];
   vocabulary: Vocabulary;
   /** Called once, while rendering, with what was found in storage. */
@@ -72,7 +76,7 @@ function subscribeStorage(onChange: () => void): () => void {
  * Saving only starts after the stored draft has been read, otherwise the empty editor of a fresh
  * page load would overwrite the draft it is about to restore.
  */
-export function useDraftAutosave({ text, style, customRules, vocabulary, onRestore }: UseDraftAutosaveOptions): DraftAutosave {
+export function useDraftAutosave({ text, style, format, customRules, vocabulary, onRestore }: UseDraftAutosaveOptions): DraftAutosave {
   // false on the server and during hydration, true afterwards
   const hydrated = useSyncExternalStore(subscribeNoop, () => true, () => false);
   const rawDraft = useSyncExternalStore(subscribeStorage, () => readStorage(DRAFT_KEY), () => null);
@@ -92,11 +96,12 @@ export function useDraftAutosave({ text, style, customRules, vocabulary, onResto
 
     const draft = prefs.autosave ? parseDraft(rawDraft) : null;
     const storedVocabulary = prefs.autosave ? readVocabulary(rawVocabulary) : null;
-    if (draft || prefs.style || storedVocabulary) {
+    if (draft || prefs.style || prefs.format || storedVocabulary) {
       onRestore({
         text: draft?.text ?? '',
         customRules: draft?.customRules ?? [],
         style: prefs.style,
+        format: prefs.format,
         vocabulary: storedVocabulary,
       });
     }
@@ -154,10 +159,10 @@ export function useDraftAutosave({ text, style, customRules, vocabulary, onResto
     };
   }, []);
 
-  // The style guide and the autosave choice are preferences, kept even when there is no draft
+  // The style guide, the format and the autosave choice are preferences, kept even when there is no draft
   useEffect(() => {
-    if (hydrated && restoreDone) savePrefs({ autosave: enabled, style });
-  }, [hydrated, restoreDone, enabled, style]);
+    if (hydrated && restoreDone) savePrefs({ autosave: enabled, style, format });
+  }, [hydrated, restoreDone, enabled, style, format]);
 
   const setEnabled = useCallback((next: boolean): void => {
     setEnabledState(next);

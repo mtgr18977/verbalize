@@ -6,6 +6,7 @@ import { useTheme } from 'next-themes';
 import { Sun, Moon, Upload, Copy, Check, Trash2, Settings, PlayCircle, ExternalLink, FileText, FileSearch, LoaderCircle, TriangleAlert, X } from 'lucide-react';
 
 import { DraftStatusLabel, RestoredNotice } from '@/components/draft-status';
+import { AsciidocPreview } from '@/components/asciidoc-preview';
 import { LintEditor } from '@/components/lint-editor';
 import { VocabularyDialog } from '@/components/vocabulary-dialog';
 import type { LintEditorHandle } from '@/components/lint-editor';
@@ -17,6 +18,8 @@ import type { Translate } from '@/i18n/translate';
 import type { AlertPosition, CustomRule, ReviewAlert, ValeAlert } from '@/types/lint';
 import { EMPTY_VOCABULARY } from '@/types/vocabulary';
 import type { Vocabulary } from '@/types/vocabulary';
+import { DEFAULT_FORMAT, DOCUMENT_ACCEPT, detectFormat } from '@/lib/document-format';
+import type { DocumentFormat } from '@/lib/document-format';
 import { describeFix, getAlertFixes } from '@/lib/vale-fixes';
 import { MAX_VOCABULARY_TERMS, cleanVocabularyMessage, usableTerms } from '@/lib/vocabulary';
 import { safeHttpUrl } from '@/lib/safe-url';
@@ -59,6 +62,12 @@ interface Snippet {
   pointer: string;
 }
 
+/** Format names are the names of the languages, so they are not translated. */
+const FORMAT_OPTIONS: ReadonlyArray<{ value: DocumentFormat; label: string }> = [
+  { value: 'markdown', label: 'Markdown' },
+  { value: 'asciidoc', label: 'AsciiDoc' },
+];
+
 const STYLE_OPTIONS = [
   { value: 'Google', label: 'Google Developer' },
   { value: 'Microsoft', label: 'Microsoft Writing' },
@@ -94,10 +103,10 @@ function getDesktopServerSnapshot(): boolean {
 }
 
 /** Everything besides the text that changes what a review finds: the rules and the vocabulary. */
-function getRulesKey(rules: CustomRule[], vocabulary: Vocabulary): string {
+function getRulesKey(rules: CustomRule[], vocabulary: Vocabulary, format: DocumentFormat): string {
   const rulesKey = rules.map((rule) => `${rule.name}\u0000${rule.content}`).join('\u0001');
   const vocabularyKey = JSON.stringify([usableTerms(vocabulary.accept), usableTerms(vocabulary.reject), vocabulary.spelling, vocabulary.enforceCase]);
-  return `${rulesKey}\u0002${vocabularyKey}`;
+  return `${rulesKey}\u0002${vocabularyKey}\u0002${format}`;
 }
 
 function getSeverityTone(severity: string): SeverityTone {
@@ -170,6 +179,7 @@ function ColumnLabel({ children }: { children: React.ReactNode }): React.JSX.Ele
 export default function Home() {
   const [text, setText] = useState('');
   const [style, setStyle] = useState('Google');
+  const [format, setFormat] = useState<DocumentFormat>(DEFAULT_FORMAT);
   const [customRules, setCustomRules] = useState<CustomRule[]>([]);
   const [vocabulary, setVocabulary] = useState<Vocabulary>(EMPTY_VOCABULARY);
   const [vocabularyOpen, setVocabularyOpen] = useState(false);
@@ -196,12 +206,14 @@ export default function Home() {
   const draft = useDraftAutosave({
     text,
     style,
+    format,
     customRules,
     vocabulary,
     onRestore: (restored) => {
       setText(restored.text);
       setCustomRules(restored.customRules);
       if (restored.vocabulary) setVocabulary(restored.vocabulary);
+      if (restored.format) setFormat(restored.format);
       if (restored.style && STYLE_OPTIONS.some((option) => option.value === restored.style)) setStyle(restored.style);
     },
   });
@@ -236,6 +248,7 @@ export default function Home() {
         body: JSON.stringify({
           text: normalizedText,
           style,
+          format,
           customRules,
           vocabulary: {
             accept: usableTerms(vocabulary.accept),
@@ -248,7 +261,7 @@ export default function Home() {
       const data = await response.json();
       if (response.ok && Array.isArray(data)) {
         setResults((data as ValeAlert[]).map((alert, id) => ({ ...alert, id })));
-        setSnapshot({ text: normalizedText, style, rulesKey: getRulesKey(customRules, vocabulary), at: new Date() });
+        setSnapshot({ text: normalizedText, style, rulesKey: getRulesKey(customRules, vocabulary, format), at: new Date() });
         // On a phone the results are on another tab: take the user there
         if (!window.matchMedia(DESKTOP_QUERY).matches) setView('alerts');
       } else {
@@ -261,7 +274,7 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [loading, text, style, customRules, vocabulary, t]);
+  }, [loading, text, style, format, customRules, vocabulary, t]);
 
   // Ctrl/Cmd + Enter runs the review from anywhere, including with the sidebar closed
   useEffect(() => {
@@ -309,6 +322,9 @@ export default function Home() {
     reader.onload = (event) => {
       const content = (event.target?.result as string).replace(/\r\n/g, '\n');
       setText(content);
+      // A .adoc file is AsciiDoc and a .md file is Markdown: the extension says which
+      const detected = detectFormat(file.name);
+      if (detected) setFormat(detected);
     };
     reader.readAsText(file);
     if (docInputRef.current) docInputRef.current.value = '';
@@ -417,7 +433,7 @@ export default function Home() {
   const normalizedText = text.replace(/\r\n/g, '\n');
   const isStale =
     snapshot !== null &&
-    (snapshot.text !== normalizedText || snapshot.style !== style || snapshot.rulesKey !== getRulesKey(customRules, vocabulary));
+    (snapshot.text !== normalizedText || snapshot.style !== style || snapshot.rulesKey !== getRulesKey(customRules, vocabulary, format));
   const textChanged = snapshot !== null && snapshot.text !== normalizedText;
   const styleLabel = STYLE_OPTIONS.find((option) => option.value === style)?.label ?? style;
   const visibleAlerts = useMemo(() => results.filter((alert) => !resolvedIds.has(alert.id)), [results, resolvedIds]);
@@ -561,7 +577,17 @@ export default function Home() {
 
           {/* Document Upload */}
           <div className="space-y-2">
-            <span className="block text-xs font-semibold text-ink-2">{t('settings.document')}</span>
+            <label htmlFor="document-format" className="block text-xs font-semibold text-ink-2">{t('settings.format')}</label>
+            <select
+              id="document-format"
+              value={format}
+              onChange={(e) => setFormat(e.target.value === 'asciidoc' ? 'asciidoc' : 'markdown')}
+              className="w-full cursor-pointer border border-rule bg-paper px-3 py-2.5 text-base font-medium text-ink lg:text-sm"
+            >
+              {FORMAT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
             <button onClick={() => docInputRef.current?.click()} className={secondaryButton}>
               <FileText className="h-4 w-4" />
               <span>{t('settings.uploadDocument')}</span>
@@ -570,7 +596,7 @@ export default function Home() {
               type="file"
               ref={docInputRef}
               onChange={handleDocUpload}
-              accept=".md,.mdx"
+              accept={DOCUMENT_ACCEPT}
               className="hidden"
             />
           </div>
@@ -763,16 +789,21 @@ export default function Home() {
                 onPositionsChange={setPositions}
                 onFixApplied={markResolved}
                 onAcceptTerm={acceptTerm}
-                placeholderText={t('editor.placeholder')}
+                format={format}
+                placeholderText={t(format === 'asciidoc' ? 'editor.placeholderAsciidoc' : 'editor.placeholder')}
                 ariaLabel={t('editor.ariaLabel')}
               />
             </div>
 
             <div id="panel-preview" role="tabpanel" aria-label={t('editor.preview')} className={`${view === 'preview' ? 'block' : 'hidden'} custom-scrollbar min-h-0 flex-1 overflow-y-auto p-5 lg:p-8`}>
+              {format === 'asciidoc' ? (
+                view === 'preview' && <AsciidocPreview source={text} />
+              ) : (
               <article className="prose prose-diagnostic">
                 {/* ReactMarkdown is secure by default as it does not render HTML unless explicitly configured with rehype-raw */}
                 <ReactMarkdown>{text || t('preview.empty')}</ReactMarkdown>
               </article>
+              )}
             </div>
           </section>
 

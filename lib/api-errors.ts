@@ -13,6 +13,8 @@ export const API_ERROR_CODES = [
   'text_too_large',
   'text_required',
   'invalid_style',
+  'invalid_format',
+  'asciidoc_unavailable',
   'invalid_request',
   'too_many_rules',
   'rule_too_large',
