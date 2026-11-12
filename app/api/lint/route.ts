@@ -5,146 +5,169 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 
+import {
+  LINT_TIMEOUT_MS,
+  MAX_BODY_BYTES,
+  MAX_VALE_OUTPUT_BYTES,
+  RequestError,
+  assertTrustedRequest,
+  enforceRateLimit,
+  parseJson,
+  parseLintRequest,
+  readLimitedBody,
+  withLintSlot,
+} from '@/lib/lint-guards';
+import type { CustomRule, LintRequest } from '@/lib/lint-guards';
+
 const execFileAsync = promisify(execFile);
 
-// Whitelist of allowed styles to prevent configuration injection
-const ALLOWED_STYLES = ['Google', 'Microsoft', 'RedHat'];
-const MAX_TEXT_LENGTH = 1024 * 1024; // 1MB
-const MAX_CUSTOM_RULES = 10;
-const MAX_RULE_LENGTH = 10 * 1024; // 10KB
+interface ExecError extends Error {
+  code?: string | number;
+  killed?: boolean;
+  signal?: string | null;
+  stdout?: string;
+  stderr?: string;
+}
 
-export async function POST(req: NextRequest) {
+type ValeOutput = Record<string, unknown[]>;
+
+function safeRuleFileName(name: string, used: Set<string>): string | null {
+  const withExtension = name.endsWith('.yml') ? name : `${name}.yml`;
+  // basename + character allowlist prevent path traversal out of the Custom style folder
+  const base = path.basename(withExtension).replace(/[^a-zA-Z0-9._-]/g, '_');
+  if (!base || base === '.' || base === '..') return null;
+
+  let candidate = base;
+  for (let n = 2; used.has(candidate); n += 1) {
+    candidate = base.replace(/\.yml$/, `-${n}.yml`);
+  }
+  used.add(candidate);
+  return candidate;
+}
+
+async function writeStyles(tmpDir: string, style: string, customRules: CustomRule[]): Promise<string> {
+  const tempStylesDir = path.join(tmpDir, 'styles');
+  await fs.mkdir(tempStylesDir, { recursive: true });
+
+  // Symlink the built-in styles so Vale finds them next to the temporary Custom style
+  const stylesPath = path.join(process.cwd(), 'styles');
   try {
-    const body = await req.json();
-    const { text, style, customRules } = body;
-
-    if (!text || typeof text !== 'string') {
-      return NextResponse.json({ error: 'No text provided or invalid format' }, { status: 400 });
-    }
-
-    if (text.length > MAX_TEXT_LENGTH) {
-      return NextResponse.json({ error: `Text exceeds maximum allowed length of ${MAX_TEXT_LENGTH} characters` }, { status: 400 });
-    }
-
-    if (!ALLOWED_STYLES.includes(style)) {
-      return NextResponse.json({ error: 'Invalid style guide selected' }, { status: 400 });
-    }
-
-    if (customRules && Array.isArray(customRules)) {
-      if (customRules.length > MAX_CUSTOM_RULES) {
-        return NextResponse.json({ error: `Too many custom rules. Maximum is ${MAX_CUSTOM_RULES}` }, { status: 400 });
-      }
-
-      for (const rule of customRules) {
-        if (rule.content && typeof rule.content === 'string' && rule.content.length > MAX_RULE_LENGTH) {
-          return NextResponse.json({ error: `Rule "${rule.name}" exceeds maximum allowed length of ${MAX_RULE_LENGTH} characters` }, { status: 400 });
-        }
+    for (const styleFolder of await fs.readdir(stylesPath)) {
+      const fullPath = path.join(stylesPath, styleFolder);
+      if ((await fs.stat(fullPath)).isDirectory()) {
+        await fs.symlink(fullPath, path.join(tempStylesDir, styleFolder), process.platform === 'win32' ? 'junction' : 'dir');
       }
     }
+  } catch (err: unknown) {
+    console.warn('Failed to symlink existing styles:', err);
+  }
 
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vale-'));
-    const tmpFile = path.join(tmpDir, 'doc.md');
-    await fs.writeFile(tmpFile, text);
+  if (customRules.length === 0) return style;
 
-    // Create a temporary styles directory to house both built-in and custom styles
-    const tempStylesDir = path.join(tmpDir, 'styles');
-    await fs.mkdir(tempStylesDir, { recursive: true });
+  const customStyleDir = path.join(tempStylesDir, 'Custom');
+  await fs.mkdir(customStyleDir, { recursive: true });
+  await fs.writeFile(
+    path.join(customStyleDir, 'meta.json'),
+    JSON.stringify({ name: 'Custom', description: 'User-uploaded rules', feed: '' })
+  );
 
-    // Symlink existing styles into the temporary styles directory
-    const stylesPath = path.join(process.cwd(), 'styles');
-    try {
-      const existingStyles = await fs.readdir(stylesPath);
-      for (const styleFolder of existingStyles) {
-        const fullPath = path.join(stylesPath, styleFolder);
-        const stats = await fs.stat(fullPath);
-        if (stats.isDirectory()) {
-          // Using junction for Windows compatibility if needed, but on Linux 'dir' works fine.
-          // In serverless (Linux), symlink is standard.
-          await fs.symlink(fullPath, path.join(tempStylesDir, styleFolder), process.platform === 'win32' ? 'junction' : 'dir');
-        }
-      }
-    } catch (err) {
-      console.warn('Failed to symlink existing styles:', err);
+  const used = new Set<string>();
+  for (const rule of customRules) {
+    const fileName = safeRuleFileName(rule.name, used);
+    if (fileName) {
+      await fs.writeFile(path.join(customStyleDir, fileName), rule.content);
+    }
+  }
+  return `${style}, Custom`;
+}
+
+async function runVale(tmpDir: string, request: LintRequest): Promise<unknown[]> {
+  const tmpFile = path.join(tmpDir, 'doc.md');
+  await fs.writeFile(tmpFile, request.text);
+
+  const basedOnStyles = await writeStyles(tmpDir, request.style, request.customRules);
+  const iniFile = path.join(tmpDir, '.vale.ini');
+  await fs.writeFile(iniFile, `StylesPath = ${path.join(tmpDir, 'styles')}\nMinAlertLevel = suggestion\n[*.md]\nBasedOnStyles = ${basedOnStyles}\n`);
+
+  const valePath = path.join(process.cwd(), process.platform === 'win32' ? 'vale.exe' : 'vale');
+
+  // Serverless deployments may not preserve the executable bit
+  try {
+    await fs.chmod(valePath, 0o755);
+  } catch (err: unknown) {
+    console.warn('Could not chmod vale binary:', err);
+  }
+
+  const parse = (stdout: string): unknown[] => {
+    const results = JSON.parse(stdout) as ValeOutput;
+    return results[tmpFile] ?? [];
+  };
+
+  try {
+    const { stdout } = await execFileAsync(valePath, [`--config=${iniFile}`, '--output=JSON', tmpFile], {
+      cwd: tmpDir,
+      // Vale does not need the server's environment (tokens, cloud credentials, ...)
+      env: { PATH: process.env.PATH ?? '', HOME: tmpDir, NODE_ENV: process.env.NODE_ENV },
+      timeout: LINT_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+      maxBuffer: MAX_VALE_OUTPUT_BYTES,
+    });
+    return parse(stdout);
+  } catch (error: unknown) {
+    const execError = error as ExecError;
+
+    if (execError.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      throw new RequestError('This text produced too many alerts to return. Lint a shorter section.', 413);
+    }
+    if (execError.killed || execError.signal === 'SIGKILL') {
+      throw new RequestError(
+        `Linting took longer than ${Math.round(LINT_TIMEOUT_MS / 1000)} s and was stopped. Lint a shorter section.`,
+        504
+      );
     }
 
-    let basedOnStyles = style;
-
-    if (customRules && Array.isArray(customRules) && customRules.length > 0) {
-      const customStyleDir = path.join(tempStylesDir, 'Custom');
-      await fs.mkdir(customStyleDir, { recursive: true });
-
-      // Add a minimal meta.json for the Custom style to be recognized by Vale
-      await fs.writeFile(path.join(customStyleDir, 'meta.json'), JSON.stringify({
-        name: 'Custom',
-        description: 'User-uploaded rules',
-        feed: ''
-      }));
-
-      for (const rule of customRules) {
-        if (rule.name && rule.content) {
-          // Ensure rule name ends with .yml
-          const ruleName = rule.name.endsWith('.yml') ? rule.name : `${rule.name}.yml`;
-          // Normalize and sanitize the rule name to prevent path traversal
-          const baseName = path.basename(ruleName);
-          const safeRuleName = baseName.replace(/[^a-zA-Z0-9._-]/g, '_');
-          if (!safeRuleName || safeRuleName === '.' || safeRuleName === '..') {
-            continue;
-          }
-          await fs.writeFile(path.join(customStyleDir, safeRuleName), rule.content);
-        }
+    // Vale exits with a non-zero code when it finds alerts, but still prints valid JSON
+    if (execError.stdout) {
+      try {
+        return parse(execError.stdout);
+      } catch {
+        throw new RequestError('Failed to parse Vale output', 500);
       }
-
-      basedOnStyles = `${style}, Custom`;
     }
 
-    const valeIni = `
-StylesPath = ${tempStylesDir}
-MinAlertLevel = suggestion
-[*.md]
-BasedOnStyles = ${basedOnStyles}
-`;
-    const iniFile = path.join(tmpDir, '.vale.ini');
-    await fs.writeFile(iniFile, valeIni);
+    console.error('Vale execution failed:', execError.stderr?.slice(0, 500) || execError.message);
+    throw new RequestError('Vale execution failed', 500);
+  }
+}
 
-    const valePath = path.join(process.cwd(), process.platform === 'win32' ? 'vale.exe' : 'vale');
+export async function POST(req: NextRequest): Promise<NextResponse> {
+  let tmpDir: string | undefined;
 
-    // Ensure the binary is executable. This is crucial for serverless environments
-    // where file permissions might not be preserved during deployment.
-    try {
-      await fs.chmod(valePath, 0o755);
-    } catch (err) {
-      console.warn('Could not chmod vale binary:', err);
+  try {
+    assertTrustedRequest(req);
+    enforceRateLimit(req);
+
+    const request = parseLintRequest(parseJson(await readLimitedBody(req, MAX_BODY_BYTES)));
+
+    const alerts = await withLintSlot(async () => {
+      tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vale-'));
+      return runVale(tmpDir, request);
+    });
+    return NextResponse.json(alerts);
+  } catch (error: unknown) {
+    if (error instanceof RequestError) {
+      return NextResponse.json({ error: error.message }, { status: error.status, headers: error.headers });
     }
-
-    try {
-      // Use --config to point to our temporary .vale.ini
-      const { stdout } = await execFileAsync(valePath, [`--config=${iniFile}`, '--output=JSON', tmpFile]);
-      const results = JSON.parse(stdout);
-      return NextResponse.json(results[tmpFile] || []);
-    } catch (error: unknown) {
-      // Vale returns non-zero exit code if it finds any alerts
-      const execError = error as { stdout?: string; message?: string };
-      if (execError.stdout) {
-        try {
-            const results = JSON.parse(execError.stdout);
-            return NextResponse.json(results[tmpFile] || []);
-        } catch {
-            return NextResponse.json({ error: 'Failed to parse Vale output' }, { status: 500 });
-        }
-      }
-      console.error('Vale execution failed:', execError.message || execError);
-      return NextResponse.json({ error: 'Vale execution failed' }, { status: 500 });
-    } finally {
-      // Clean up temporary files
+    console.error('Internal server error:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  } finally {
+    // Covers every path after mkdtemp, including validation and write failures
+    if (tmpDir) {
       try {
         await fs.rm(tmpDir, { recursive: true, force: true });
-      } catch (rmError) {
+      } catch (rmError: unknown) {
         console.error('Failed to remove temp directory:', rmError);
       }
     }
-  } catch (error: unknown) {
-    const err = error as Error;
-    console.error('Internal server error:', err);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

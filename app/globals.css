@@ -1,9 +1,11 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
-@theme {
-  --dark-mode: selector;
-}
+/*
+ * Tailwind v4 ignores `--dark-mode: selector`; without this variant every `dark:` utility
+ * follows the OS color scheme instead of the `.dark` class set by next-themes.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
 
 :root {
   --background: #ffffff;

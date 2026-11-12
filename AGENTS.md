@@ -221,7 +221,10 @@ export function Editor({ initialValue = '', onLint, disabled = false }: EditorPr
 |----------|---------|---------|----------|
 | `VALE_CONFIG_PATH` | Path to .vale.ini | `./.vale.ini` | No |
 | `VALE_STYLES_PATH` | Path to styles directory | `./styles` | No |
-| `MAX_INPUT_SIZE` | Maximum text input size (bytes) | 1048576 (1MB) | No |
+| `MAX_INPUT_SIZE` | Maximum document size in bytes (UTF-8) | 204800 (200 KB) | No |
+| `LINT_TIMEOUT_MS` | Hard time limit for one Vale run; the process is killed and the API answers 504 | 8000 | No |
+| `MAX_CONCURRENT_LINTS` | Vale processes allowed at once per server instance; extra requests get 503 | 2 | No |
+| `RATE_LIMIT_MAX` | Requests per client per minute (in-memory, per instance); extra requests get 429 | 30 | No |
 | `NODE_ENV` | Environment mode | `development` | Yes |
 
 ---
@@ -283,7 +286,9 @@ npx playwright show-report
 
 ### Design Constraints
 
-- Text editor must support documents up to 1MB.
+- Documents up to 200 KB (`MAX_INPUT_SIZE`) are linted per request. Larger files must be linted in sections. Vale's run time grows faster than linearly with the number of alerts (measured: 25 KB of alert-dense text takes about 5 s, 100 KB about 66 s), so `LINT_TIMEOUT_MS` is what actually bounds CPU time.
+- Custom rules may only use data-only `extends` types (`existence`, `substitution`, `occurrence`, `repetition`, `consistency`, `conditional`, `capitalization`, `metric`, `spelling`, `sequence`). `script` rules are rejected because they can run forever. The allow-list lives in `lib/lint-guards.ts`.
+- `/api/lint` requires `Content-Type: application/json` and rejects cross-site callers (`Sec-Fetch-Site`, `Origin`).
 - Lint results must display within 2 seconds for typical documents (< 10,000 words).
 - Interface must be fully functional without JavaScript (progressive enhancement).
 
@@ -510,3 +515,13 @@ Before proposing architectural changes or submitting code, verify:
 **Maintained by:** Verbalize Development Team  
 **Feedback:** Submit issues via GitHub repository  
 **License:** Refer to repository LICENSE file
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+## This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

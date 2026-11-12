@@ -1,9 +1,9 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback, useSyncExternalStore } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useTheme } from 'next-themes';
-import { Sun, Moon, Upload, Copy, Check, Trash2, Sidebar, PlayCircle, ExternalLink, FileText, X } from 'lucide-react';
+import { Sun, Moon, Upload, Copy, Check, Trash2, Sidebar, PlayCircle, ExternalLink, FileText, FileSearch, LoaderCircle, TriangleAlert, X } from 'lucide-react';
 
 interface ValeAlert {
   Action: {
@@ -25,6 +25,44 @@ interface CustomRule {
   content: string;
 }
 
+/** What was linted, so the UI can tell when the results no longer match the editor. */
+interface ReviewSnapshot {
+  text: string;
+  style: string;
+  rulesKey: string;
+  at: Date;
+}
+
+interface PanelMessageProps {
+  icon: React.ReactNode;
+  title: string;
+  detail: string;
+}
+
+const STYLE_OPTIONS = [
+  { value: 'Google', label: 'Google Developer' },
+  { value: 'Microsoft', label: 'Microsoft Writing' },
+  { value: 'RedHat', label: 'Red Hat Style' },
+] as const;
+
+function subscribeNoop(): () => void {
+  return () => {};
+}
+
+function getRulesKey(rules: CustomRule[]): string {
+  return rules.map((rule) => `${rule.name}\u0000${rule.content}`).join('\u0001');
+}
+
+function PanelMessage({ icon, title, detail }: PanelMessageProps): React.JSX.Element {
+  return (
+    <div role="status" className="h-full flex flex-col items-center justify-center text-center px-6">
+      <div className="mb-4">{icon}</div>
+      <p className="text-sm font-bold text-gray-700 dark:text-gray-200">{title}</p>
+      <p className="mt-1 text-xs text-gray-600 dark:text-gray-400">{detail}</p>
+    </div>
+  );
+}
+
 export default function Home() {
   const [text, setText] = useState('');
   const [style, setStyle] = useState('Google');
@@ -33,20 +71,20 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [mounted, setMounted] = useState(false);
-  const { theme, setTheme } = useTheme();
+  // false on the server and during hydration, true afterwards: avoids a theme-icon mismatch
+  const mounted = useSyncExternalStore(subscribeNoop, () => true, () => false);
+  const [snapshot, setSnapshot] = useState<ReviewSnapshot | null>(null);
+  // `theme` is "system" until the user picks one; `resolvedTheme` is what is actually shown
+  const { resolvedTheme, setTheme } = useTheme();
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
 
-  // Avoid hydration mismatch
-  useEffect(() => {
-    setMounted(true);
-  }, []);
 
-  const handleLint = async () => {
+  const handleLint = useCallback(async (): Promise<void> => {
+    if (loading) return;
     if (!text.trim()) {
       alert('Please enter some text to lint.');
       return;
@@ -60,6 +98,7 @@ export default function Home() {
 
     setLoading(true);
     setResults([]);
+    setSnapshot(null);
     try {
       const response = await fetch('/api/lint', {
         method: 'POST',
@@ -69,6 +108,7 @@ export default function Home() {
       const data = await response.json();
       if (response.ok && Array.isArray(data)) {
         setResults(data as ValeAlert[]);
+        setSnapshot({ text: normalizedText, style, rulesKey: getRulesKey(customRules), at: new Date() });
       } else {
         console.error('Linting error:', data);
         alert('Linting failed: ' + (data.error || 'Unknown error'));
@@ -79,7 +119,19 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [loading, text, style, customRules]);
+
+  // Ctrl/Cmd + Enter runs the review from anywhere, including with the sidebar closed
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+        event.preventDefault();
+        void handleLint();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleLint]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -124,6 +176,7 @@ export default function Home() {
     if (text && confirm('Are you sure you want to clear the editor?')) {
       setText('');
       setResults([]);
+      setSnapshot(null);
     }
   };
 
@@ -195,13 +248,73 @@ export default function Home() {
     textarea.setSelectionRange(start, end);
   };
 
+  // Review state: results only count as current while the editor, style and rules still match
+  const normalizedText = text.replace(/\r\n/g, '\n');
+  const isStale =
+    snapshot !== null &&
+    (snapshot.text !== normalizedText || snapshot.style !== style || snapshot.rulesKey !== getRulesKey(customRules));
+  const textChanged = snapshot !== null && snapshot.text !== normalizedText;
+  const styleLabel = STYLE_OPTIONS.find((option) => option.value === style)?.label ?? style;
+  const reviewedLines = snapshot ? snapshot.text.split('\n') : [];
+  const currentLines = normalizedText.split('\n');
+  // An alert is out of date when the line it points at is no longer the line that was reviewed
+  const isAlertStale = (alert: ValeAlert): boolean =>
+    textChanged && reviewedLines[alert.Line - 1] !== currentLines[alert.Line - 1];
+
+  const renderEmptyState = (): React.JSX.Element => {
+    if (loading) {
+      return (
+        <PanelMessage
+          icon={<LoaderCircle className="w-8 h-8 text-blue-600 dark:text-blue-400 animate-spin" />}
+          title="Reviewing…"
+          detail={`Checking the text against ${styleLabel}.`}
+        />
+      );
+    }
+    if (snapshot === null) {
+      return (
+        <PanelMessage
+          icon={<FileSearch className="w-8 h-8 text-gray-500 dark:text-gray-400" />}
+          title="Not reviewed yet"
+          detail={`Press Run Linting (Ctrl+Enter) to check this document against ${styleLabel}.`}
+        />
+      );
+    }
+    if (isStale) {
+      return (
+        <PanelMessage
+          icon={<FileSearch className="w-8 h-8 text-gray-500 dark:text-gray-400" />}
+          title="The last review found no alerts"
+          detail="The document changed since then, so this result no longer applies."
+        />
+      );
+    }
+    const lineCount = snapshot.text.split('\n').length;
+    const time = snapshot.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return (
+      <PanelMessage
+        icon={<Check className="w-8 h-8 text-green-600 dark:text-green-400" />}
+        title={`No alerts in ${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`}
+        detail={`Reviewed at ${time} with ${styleLabel}.`}
+      />
+    );
+  };
+
+  const staleMessage = textChanged
+    ? 'The text changed after the last review. Alerts on edited lines are marked. Press Run Linting (Ctrl+Enter) to refresh.'
+    : 'The style guide or custom rules changed after the last review. Press Run Linting (Ctrl+Enter) to refresh.';
+
   return (
     <div className="flex h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 overflow-hidden font-sans">
-      {/* Sidebar */}
-      <aside className={`${sidebarOpen ? 'w-80' : 'w-0'} transition-all duration-300 ease-in-out bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col overflow-hidden shrink-0`}>
+      {/* Sidebar. `inert` keeps the hidden controls out of the tab order when it is collapsed. */}
+      <aside
+        inert={!sidebarOpen}
+        aria-label="Settings"
+        className={`${sidebarOpen ? 'w-80' : 'w-0'} transition-all duration-300 ease-in-out bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col overflow-hidden shrink-0`}
+      >
         <div className="p-6 border-b border-gray-100 dark:border-gray-800 flex justify-between items-center">
           <h2 className="font-bold text-xl text-blue-800 dark:text-blue-400 tracking-tight">Settings</h2>
-          <button onClick={() => setSidebarOpen(false)} className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+          <button onClick={() => setSidebarOpen(false)} aria-label="Close settings" className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -215,9 +328,9 @@ export default function Home() {
               onChange={(e) => setStyle(e.target.value)}
               className="w-full p-3 border border-gray-200 dark:border-gray-700 rounded-xl bg-gray-50 dark:bg-gray-800 focus:ring-2 focus:ring-blue-500 outline-none transition cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100"
             >
-              <option value="Google">Google Developer</option>
-              <option value="Microsoft">Microsoft Writing</option>
-              <option value="RedHat">Red Hat Style</option>
+              {STYLE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
             </select>
             <p className="text-[11px] text-gray-500 leading-relaxed italic">
               Primary ruleset for validation.
@@ -286,20 +399,6 @@ export default function Home() {
           </div>
         </div>
 
-        <div className="p-6 border-t border-gray-100 dark:border-gray-800">
-          <button
-            onClick={handleLint}
-            disabled={loading}
-            className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-blue-200 dark:shadow-none hover:bg-blue-700 disabled:bg-blue-300 dark:disabled:bg-blue-900/50 transition-all active:scale-[0.98] flex items-center justify-center gap-3 group"
-          >
-            {loading ? (
-              <PlayCircle className="animate-spin h-5 w-5 text-white" />
-            ) : (
-              <PlayCircle className="h-5 w-5 group-hover:rotate-12 transition-transform" />
-            )}
-            <span className="tracking-widest uppercase text-sm">{loading ? 'Analyzing...' : 'Run Linting'}</span>
-          </button>
-        </div>
       </aside>
 
       {/* Main Content */}
@@ -308,7 +407,7 @@ export default function Home() {
         <header className="h-16 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between px-8 shrink-0">
           <div className="flex items-center gap-4">
             {!sidebarOpen && (
-              <button onClick={() => setSidebarOpen(true)} className="p-2 text-gray-500 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
+              <button onClick={() => setSidebarOpen(true)} aria-label="Open settings" className="p-2 text-gray-500 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
                 <Sidebar className="w-6 h-6" />
               </button>
             )}
@@ -318,13 +417,23 @@ export default function Home() {
           </div>
 
           <div className="flex items-center gap-4">
+            <button
+              onClick={() => void handleLint()}
+              disabled={loading}
+              title="Run Linting (Ctrl/⌘ + Enter)"
+              className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg font-bold text-sm hover:bg-blue-700 disabled:bg-blue-800 disabled:cursor-wait transition-colors"
+            >
+              {loading ? <LoaderCircle className="animate-spin h-4 w-4" /> : <PlayCircle className="h-4 w-4" />}
+              <span>{loading ? 'Analyzing...' : 'Run Linting'}</span>
+              <kbd className="hidden md:inline text-[11px] font-mono text-blue-100">Ctrl ↵</kbd>
+            </button>
             {mounted && (
               <button
-                onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+                onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}
                 className="p-2 rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
                 title="Toggle Theme"
               >
-                {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+                {resolvedTheme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
               </button>
             )}
             <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-gray-100 dark:bg-gray-800 rounded-full">
@@ -397,26 +506,30 @@ export default function Home() {
                 )}
               </span>
               {results.length > 0 && (
-                <button onClick={() => setResults([])} className="text-[9px] font-bold text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 uppercase tracking-tighter">Clear</button>
+                <button onClick={() => { setResults([]); setSnapshot(null); }} className="text-[9px] font-bold text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 uppercase tracking-tighter">Clear</button>
               )}
             </div>
 
             <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-              {results.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center text-center opacity-40 grayscale pointer-events-none">
-                  <div className="bg-white dark:bg-gray-800 p-4 rounded-full shadow-sm mb-4">
-                    <Check className="w-8 h-8 text-green-500" />
-                  </div>
-                  <p className="text-xs font-black text-gray-500 dark:text-gray-400 uppercase tracking-widest">Document Clean</p>
-                  <p className="text-[10px] mt-1">No style violations detected.</p>
+              {isStale && (
+                <div role="status" className="mb-3 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200">
+                  <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>{staleMessage}</span>
                 </div>
+              )}
+              {results.length === 0 ? (
+                renderEmptyState()
               ) : (
                 <div className="space-y-3">
-                  {results.map((alert, index) => (
+                  {results.map((alert, index) => {
+                    const stale = isAlertStale(alert);
+                    return (
                     <div
                       key={index}
-                      onClick={(e) => handleAlertClick(alert, e)}
-                      className={`p-4 rounded-xl border bg-white dark:bg-gray-800 shadow-sm transition-all hover:scale-[1.01] hover:shadow-md hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer group ${
+                      onClick={stale ? undefined : (e) => handleAlertClick(alert, e)}
+                      className={`p-4 rounded-xl border bg-white dark:bg-gray-800 shadow-sm transition-all group ${
+                        stale ? 'border-dashed' : 'hover:scale-[1.01] hover:shadow-md hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer'
+                      } ${
                         alert.Severity === 'error' ? 'border-red-100 dark:border-red-900/30' :
                         alert.Severity === 'warning' ? 'border-yellow-100 dark:border-yellow-900/30' : 'border-blue-100 dark:border-blue-900/30'
                       }`}
@@ -428,9 +541,9 @@ export default function Home() {
                         }`}>
                           {alert.Severity}
                         </span>
-                        <span className="text-[10px] font-mono font-bold text-gray-400 dark:text-gray-500">Line {alert.Line}</span>
+                        <span className="text-[10px] font-mono font-bold text-gray-500 dark:text-gray-400">{stale ? 'Line changed' : `Line ${alert.Line}`}</span>
                       </div>
-                      <p className="text-sm font-bold text-gray-800 dark:text-gray-200 leading-snug">{alert.Message}</p>
+                      <p className={`text-sm font-bold text-gray-800 dark:text-gray-200 leading-snug ${stale ? 'italic' : ''}`}>{alert.Message}</p>
                       <div className="mt-3 pt-3 border-t border-gray-50 dark:border-gray-700 flex items-center justify-between">
                         <span className="text-[9px] text-gray-400 dark:text-gray-500 font-bold uppercase tracking-tight">{alert.Check}</span>
                         {alert.Link && (
@@ -440,7 +553,8 @@ export default function Home() {
                         )}
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

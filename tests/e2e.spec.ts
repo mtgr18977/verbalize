@@ -45,8 +45,8 @@ test.describe('Writer Assistant', () => {
     const editor = page.locator('textarea');
     await editor.fill('We use this in order to test the linting.');
 
-    // Match the button by text as it's rendered with uppercase CSS but the source text is "Run Linting"
-    const lintButton = page.getByText('Run Linting');
+    // Match by role: the panel hint also mentions "Run Linting", so a text match is ambiguous
+    const lintButton = page.getByRole('button', { name: /Run Linting/ });
     await lintButton.click();
 
     // Wait for the results column to show alerts
