@@ -7,6 +7,7 @@ import { Sun, Moon, Upload, Copy, Check, Trash2, Settings, PlayCircle, ExternalL
 
 import { DraftStatusLabel, RestoredNotice } from '@/components/draft-status';
 import { LintEditor } from '@/components/lint-editor';
+import { VocabularyDialog } from '@/components/vocabulary-dialog';
 import type { LintEditorHandle } from '@/components/lint-editor';
 import { useDraftAutosave } from '@/hooks/use-draft-autosave';
 import { describeApiError } from '@/i18n/api-error';
@@ -14,7 +15,10 @@ import { LOCALES, LOCALE_NAMES, isLocale } from '@/i18n/locale';
 import { useI18n } from '@/i18n/provider';
 import type { Translate } from '@/i18n/translate';
 import type { AlertPosition, CustomRule, ReviewAlert, ValeAlert } from '@/types/lint';
-import { describeFix, getFixes } from '@/lib/vale-fixes';
+import { EMPTY_VOCABULARY } from '@/types/vocabulary';
+import type { Vocabulary } from '@/types/vocabulary';
+import { describeFix, getAlertFixes } from '@/lib/vale-fixes';
+import { MAX_VOCABULARY_TERMS, cleanVocabularyMessage, usableTerms } from '@/lib/vocabulary';
 import { safeHttpUrl } from '@/lib/safe-url';
 
 /** What was linted, so the UI can tell when the results no longer match the editor. */
@@ -89,8 +93,11 @@ function getDesktopServerSnapshot(): boolean {
   return true;
 }
 
-function getRulesKey(rules: CustomRule[]): string {
-  return rules.map((rule) => `${rule.name}\u0000${rule.content}`).join('\u0001');
+/** Everything besides the text that changes what a review finds: the rules and the vocabulary. */
+function getRulesKey(rules: CustomRule[], vocabulary: Vocabulary): string {
+  const rulesKey = rules.map((rule) => `${rule.name}\u0000${rule.content}`).join('\u0001');
+  const vocabularyKey = JSON.stringify([usableTerms(vocabulary.accept), usableTerms(vocabulary.reject), vocabulary.spelling, vocabulary.enforceCase]);
+  return `${rulesKey}\u0002${vocabularyKey}`;
 }
 
 function getSeverityTone(severity: string): SeverityTone {
@@ -164,6 +171,8 @@ export default function Home() {
   const [text, setText] = useState('');
   const [style, setStyle] = useState('Google');
   const [customRules, setCustomRules] = useState<CustomRule[]>([]);
+  const [vocabulary, setVocabulary] = useState<Vocabulary>(EMPTY_VOCABULARY);
+  const [vocabularyOpen, setVocabularyOpen] = useState(false);
   const [results, setResults] = useState<ReviewAlert[]>([]);
   // Alerts fixed with one click: hidden from the list until the next review
   const [resolvedIds, setResolvedIds] = useState<ReadonlySet<number>>(() => new Set());
@@ -188,9 +197,11 @@ export default function Home() {
     text,
     style,
     customRules,
+    vocabulary,
     onRestore: (restored) => {
       setText(restored.text);
       setCustomRules(restored.customRules);
+      if (restored.vocabulary) setVocabulary(restored.vocabulary);
       if (restored.style && STYLE_OPTIONS.some((option) => option.value === restored.style)) setStyle(restored.style);
     },
   });
@@ -222,12 +233,22 @@ export default function Home() {
       const response = await fetch('/api/lint', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: normalizedText, style, customRules }),
+        body: JSON.stringify({
+          text: normalizedText,
+          style,
+          customRules,
+          vocabulary: {
+            accept: usableTerms(vocabulary.accept),
+            reject: usableTerms(vocabulary.reject),
+            spelling: vocabulary.spelling,
+            enforceCase: vocabulary.enforceCase,
+          },
+        }),
       });
       const data = await response.json();
       if (response.ok && Array.isArray(data)) {
         setResults((data as ValeAlert[]).map((alert, id) => ({ ...alert, id })));
-        setSnapshot({ text: normalizedText, style, rulesKey: getRulesKey(customRules), at: new Date() });
+        setSnapshot({ text: normalizedText, style, rulesKey: getRulesKey(customRules, vocabulary), at: new Date() });
         // On a phone the results are on another tab: take the user there
         if (!window.matchMedia(DESKTOP_QUERY).matches) setView('alerts');
       } else {
@@ -240,7 +261,7 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [loading, text, style, customRules, t]);
+  }, [loading, text, style, customRules, vocabulary, t]);
 
   // Ctrl/Cmd + Enter runs the review from anywhere, including with the sidebar closed
   useEffect(() => {
@@ -352,6 +373,27 @@ export default function Home() {
     }
   });
 
+  /** Adds the word of a spelling alert to the accepted terms, and clears every alert for that word. */
+  const acceptTerm = (id: number): void => {
+    const source = results.find((candidate) => candidate.id === id);
+    if (!source) return;
+    const term = source.Match.trim();
+
+    if (!vocabulary.accept.includes(term)) {
+      if (vocabulary.accept.length >= MAX_VOCABULARY_TERMS) {
+        alert(t('vocab.full', { max: MAX_VOCABULARY_TERMS }));
+        return;
+      }
+      setVocabulary({ ...vocabulary, accept: [...vocabulary.accept, term] });
+    }
+
+    const sameWord = results
+      .filter((candidate) => candidate.Check === source.Check && candidate.Match === source.Match)
+      .map((candidate) => candidate.id);
+    setResolvedIds((previous) => new Set([...previous, ...sameWord]));
+    editorHandleRef.current?.dismiss(sameWord);
+  };
+
   const markResolved = useCallback((id: number): void => {
     setResolvedIds((previous) => new Set(previous).add(id));
   }, []);
@@ -375,7 +417,7 @@ export default function Home() {
   const normalizedText = text.replace(/\r\n/g, '\n');
   const isStale =
     snapshot !== null &&
-    (snapshot.text !== normalizedText || snapshot.style !== style || snapshot.rulesKey !== getRulesKey(customRules));
+    (snapshot.text !== normalizedText || snapshot.style !== style || snapshot.rulesKey !== getRulesKey(customRules, vocabulary));
   const textChanged = snapshot !== null && snapshot.text !== normalizedText;
   const styleLabel = STYLE_OPTIONS.find((option) => option.value === style)?.label ?? style;
   const visibleAlerts = useMemo(() => results.filter((alert) => !resolvedIds.has(alert.id)), [results, resolvedIds]);
@@ -576,6 +618,18 @@ export default function Home() {
             />
           </div>
 
+          {/* Vocabulary */}
+          <div className="space-y-2">
+            <span className="block text-xs font-semibold text-ink-2">{t('settings.vocabulary')}</span>
+            <p data-testid="vocabulary-summary" className="text-sm text-ink">
+              {t('vocab.summary', { accepted: vocabulary.accept.length, rejected: vocabulary.reject.length })}
+              <span className="block text-xs text-ink-2">{vocabulary.spelling ? t('vocab.spellingOn') : t('vocab.spellingOff')}</span>
+            </p>
+            <button onClick={() => setVocabularyOpen(true)} className={secondaryButton}>
+              {t('vocab.open')}
+            </button>
+          </div>
+
           {/* Drafts */}
           <div className="space-y-2">
             <span className="block text-xs font-semibold text-ink-2">{t('settings.drafts')}</span>
@@ -708,6 +762,7 @@ export default function Home() {
                 reviewedText={snapshot?.text ?? null}
                 onPositionsChange={setPositions}
                 onFixApplied={markResolved}
+                onAcceptTerm={acceptTerm}
                 placeholderText={t('editor.placeholder')}
                 ariaLabel={t('editor.ariaLabel')}
               />
@@ -760,7 +815,8 @@ export default function Home() {
                       span = [start.column, end.column];
                     }
                     const snippet = buildSnippet((live ? currentLines : reviewedLines)[line - 1] ?? '', span, line);
-                    const fixes = stale ? [] : getFixes(alert.Action);
+                    const fixes = stale ? [] : getAlertFixes(alert);
+                    const canAccept = !stale && alert.Check === 'Vale.Spelling';
                     const href = safeHttpUrl(alert.Link);
                     return (
                       <li
@@ -779,12 +835,12 @@ export default function Home() {
                             {stale ? t('alerts.edited') : `L${line}:${span[0]}`}
                           </span>
                         </div>
-                        <p className={`mt-1.5 text-sm leading-snug text-ink ${stale ? 'italic' : ''}`}>{alert.Message}</p>
+                        <p className={`mt-1.5 text-sm leading-snug text-ink ${stale ? 'italic' : ''}`}>{cleanVocabularyMessage(alert.Check, alert.Message)}</p>
                         <pre className="custom-scrollbar mt-2 overflow-x-auto font-mono text-xs leading-5 text-ink-2">
                           {`${snippet.gutter} │ ${snippet.code}\n${' '.repeat(snippet.gutter.length)} │ `}
                           <span className={tone.text}>{snippet.pointer}</span>
                         </pre>
-                        {fixes.length > 0 && (
+                        {(fixes.length > 0 || canAccept) && (
                           <div className="mt-2 flex flex-wrap gap-2">
                             {fixes.map((fix, fixIndex) => (
                               <button
@@ -796,6 +852,15 @@ export default function Home() {
                                 {describeFix(fix, t)}
                               </button>
                             ))}
+                            {canAccept && (
+                              <button
+                                type="button"
+                                onClick={() => acceptTerm(alert.id)}
+                                className="min-h-9 border border-accent px-2.5 text-xs font-semibold text-accent hover:bg-accent hover:text-on-accent lg:min-h-0 lg:py-1"
+                              >
+                                {t('vocab.acceptTerm', { term: alert.Match })}
+                              </button>
+                            )}
                           </div>
                         )}
                         {href && (
@@ -835,6 +900,8 @@ export default function Home() {
           </TabButton>
         </div>
       </main>
+
+      <VocabularyDialog open={vocabularyOpen} onClose={() => setVocabularyOpen(false)} vocabulary={vocabulary} onChange={setVocabulary} />
     </div>
   );
 }

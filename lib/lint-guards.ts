@@ -1,6 +1,9 @@
 import { parse as parseYaml } from 'yaml';
 
 import type { ApiErrorCode, ApiErrorParams } from '@/lib/api-errors';
+import { EMPTY_VOCABULARY } from '@/types/vocabulary';
+import type { Vocabulary } from '@/types/vocabulary';
+import { MAX_VOCABULARY_TERMS, MAX_VOCABULARY_TERM_LENGTH, normalizeTerms } from '@/lib/vocabulary';
 
 /**
  * Limits and request guards for POST /api/lint.
@@ -31,7 +34,7 @@ export const MAX_RULE_LENGTH = 10 * 1024;
 /** Upper bound for Vale's JSON output (child_process default is only 1 MB). */
 export const MAX_VALE_OUTPUT_BYTES = 16 * 1024 * 1024;
 /** Request body cap; leaves room for JSON escaping of the text and the rules. */
-export const MAX_BODY_BYTES = 2 * MAX_INPUT_SIZE + 2 * MAX_CUSTOM_RULES * MAX_RULE_LENGTH + 8 * 1024;
+export const MAX_BODY_BYTES = 2 * MAX_INPUT_SIZE + 2 * MAX_CUSTOM_RULES * MAX_RULE_LENGTH + 2 * 2 * MAX_VOCABULARY_TERMS * MAX_VOCABULARY_TERM_LENGTH + 8 * 1024;
 
 export const ALLOWED_STYLES = ['Google', 'Microsoft', 'RedHat'] as const;
 export type AllowedStyle = (typeof ALLOWED_STYLES)[number];
@@ -62,6 +65,7 @@ export interface LintRequest {
   text: string;
   style: AllowedStyle;
   customRules: CustomRule[];
+  vocabulary: Vocabulary;
 }
 
 interface RequestErrorOptions {
@@ -129,13 +133,61 @@ function assertSafeRule(rule: CustomRule): void {
   }
 }
 
+/** Terms are written escaped, so any text is safe; only size and control characters are limited. */
+function parseTermList(value: unknown, list: 'accept' | 'reject'): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new RequestError(`vocabulary.${list} must be an array of strings`, 400, 'vocabulary_invalid');
+  }
+
+  const terms = value as string[];
+  if (terms.length > MAX_VOCABULARY_TERMS) {
+    throw new RequestError(`vocabulary.${list} has more than ${MAX_VOCABULARY_TERMS} terms`, 400, 'vocabulary_too_many', {
+      params: { max: MAX_VOCABULARY_TERMS },
+    });
+  }
+  for (const term of terms) {
+    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(term)) {
+      throw new RequestError(`vocabulary.${list} contains control characters`, 400, 'vocabulary_invalid');
+    }
+    if (term.trim().length > MAX_VOCABULARY_TERM_LENGTH) {
+      throw new RequestError(
+        `A term in vocabulary.${list} is longer than ${MAX_VOCABULARY_TERM_LENGTH} characters`,
+        400,
+        'vocabulary_term_too_long',
+        { params: { max: MAX_VOCABULARY_TERM_LENGTH } }
+      );
+    }
+  }
+  return normalizeTerms(terms);
+}
+
+function parseVocabulary(value: unknown): Vocabulary {
+  if (value === undefined || value === null) return EMPTY_VOCABULARY;
+  if (!isRecord(value)) {
+    throw new RequestError('vocabulary must be an object', 400, 'vocabulary_invalid');
+  }
+  if (
+    (value.spelling !== undefined && typeof value.spelling !== 'boolean') ||
+    (value.enforceCase !== undefined && typeof value.enforceCase !== 'boolean')
+  ) {
+    throw new RequestError('vocabulary.spelling and vocabulary.enforceCase must be booleans', 400, 'vocabulary_invalid');
+  }
+  return {
+    accept: parseTermList(value.accept, 'accept'),
+    reject: parseTermList(value.reject, 'reject'),
+    spelling: value.spelling === true,
+    enforceCase: value.enforceCase !== false,
+  };
+}
+
 /** Validates the decoded JSON body. Every field is checked for type before it is used. */
 export function parseLintRequest(body: unknown): LintRequest {
   if (!isRecord(body)) {
     throw new RequestError('Request body must be a JSON object', 400, 'invalid_request');
   }
 
-  const { text, style, customRules } = body;
+  const { text, style, customRules, vocabulary } = body;
 
   if (typeof text !== 'string' || text.length === 0) {
     throw new RequestError('No text provided or invalid format', 400, 'text_required');
@@ -180,7 +232,7 @@ export function parseLintRequest(body: unknown): LintRequest {
     }
   }
 
-  return { text, style: style as AllowedStyle, customRules: rules };
+  return { text, style: style as AllowedStyle, customRules: rules, vocabulary: parseVocabulary(vocabulary) };
 }
 
 /** Reads the request body as text, aborting as soon as it grows past the limit. */

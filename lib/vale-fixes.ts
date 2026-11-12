@@ -1,5 +1,6 @@
 import type { Translate } from '@/i18n/translate';
-import type { ValeAction } from '@/types/lint';
+import { getCanonicalTerm } from '@/lib/vocabulary';
+import type { ValeAction, ValeAlert } from '@/types/lint';
 
 export type FixKind = 'replace' | 'remove' | 'trim' | 'regex';
 
@@ -94,4 +95,16 @@ export function getFixes(action: ValeAction | null | undefined): Fix[] {
     default:
       return [];
   }
+}
+
+/**
+ * The fixes for an alert. Vale attaches an `Action` to most of its rules, but not to `Vale.Terms`:
+ * there the capitalization it asks for is only in the message, so the fix is read from there.
+ */
+export function getAlertFixes(alert: Pick<ValeAlert, 'Action' | 'Check' | 'Message'>): Fix[] {
+  const fixes = getFixes(alert.Action);
+  if (fixes.length > 0) return fixes;
+
+  const canonical = getCanonicalTerm(alert.Check, alert.Message);
+  return canonical === null ? [] : [{ kind: 'replace', value: canonical, apply: () => canonical }];
 }

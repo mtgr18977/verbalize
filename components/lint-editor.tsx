@@ -21,7 +21,8 @@ import { GFM, parser as markdownParser } from '@lezer/markdown';
 
 import type { AlertPosition, ReviewAlert } from '@/types/lint';
 import { useI18n } from '@/i18n/provider';
-import { describeFix, getFixes } from '@/lib/vale-fixes';
+import { describeFix, getAlertFixes } from '@/lib/vale-fixes';
+import { cleanVocabularyMessage } from '@/lib/vocabulary';
 import type { Fix } from '@/lib/vale-fixes';
 import { safeHttpUrl } from '@/lib/safe-url';
 
@@ -30,6 +31,8 @@ export interface LintEditorHandle {
   reveal: (id: number, options?: { focus?: boolean }) => void;
   /** Applies the `fixIndex`-th correction of an alert, if it is still in the document. */
   applyFix: (id: number, fixIndex: number) => void;
+  /** Stops underlining these alerts, for ones resolved without changing the text. */
+  dismiss: (ids: number[]) => void;
 }
 
 interface LintEditorProps {
@@ -42,6 +45,8 @@ interface LintEditorProps {
   /** Called with the current position of every alert still underlined, after each edit. */
   onPositionsChange: (positions: Map<number, AlertPosition>) => void;
   onFixApplied: (id: number) => void;
+  /** The user chose to accept the word of a spelling alert into the project vocabulary. */
+  onAcceptTerm: (id: number) => void;
   placeholderText: string;
   ariaLabel: string;
   className?: string;
@@ -51,6 +56,7 @@ interface Callbacks {
   onChange: (text: string) => void;
   onPositionsChange: (positions: Map<number, AlertPosition>) => void;
   onFixApplied: (id: number) => void;
+  onAcceptTerm: (id: number) => void;
 }
 
 /**
@@ -187,12 +193,12 @@ function runFix(view: EditorView, from: number, to: number, fix: Fix): void {
 }
 
 export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function LintEditor(
-  { value, onChange, alerts, reviewedText, onPositionsChange, onFixApplied, placeholderText, ariaLabel, className },
+  { value, onChange, alerts, reviewedText, onPositionsChange, onFixApplied, onAcceptTerm, placeholderText, ariaLabel, className },
   ref
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
-  const callbacksRef = useRef<Callbacks>({ onChange, onPositionsChange, onFixApplied });
+  const callbacksRef = useRef<Callbacks>({ onChange, onPositionsChange, onFixApplied, onAcceptTerm });
   const lastEmittedRef = useRef(value);
   const lastPositionsRef = useRef<Map<number, AlertPosition>>(new Map());
   // Diagnostic objects keep their original positions; this ties each one to its alert id
@@ -208,16 +214,34 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
     translateRef.current = t;
   });
 
+  /** Where every underlined alert is now. */
+  const collectPositions = useCallback((view: EditorView): Map<number, AlertPosition> => {
+    const positions = new Map<number, AlertPosition>();
+    forEachDiagnostic(view.state, (diagnostic, from, to) => {
+      const id = alertIdsRef.current.get(diagnostic);
+      if (id !== undefined) positions.set(id, { from, to });
+    });
+    return positions;
+  }, []);
+
   /** Builds the CodeMirror diagnostic of an alert: tooltip text and fixes, in the current language. */
   const buildDiagnostic = useCallback((alert: ReviewAlert, from: number, to: number): Diagnostic => {
     const translate = translateRef.current;
-    const actions: Action[] = getFixes(alert.Action).map((fix) => ({
+    const actions: Action[] = getAlertFixes(alert).map((fix) => ({
       name: describeFix(fix, translate),
       apply: (actionView, actionFrom, actionTo) => {
         runFix(actionView, actionFrom, actionTo, fix);
         callbacksRef.current.onFixApplied(alert.id);
       },
     }));
+    // A word the spelling check does not know may be jargon of the project: offer to accept it
+    if (alert.Check === 'Vale.Spelling') {
+      actions.push({
+        name: translate('vocab.acceptTerm', { term: alert.Match }),
+        apply: () => callbacksRef.current.onAcceptTerm(alert.id),
+      });
+    }
+    const cleanMessage = cleanVocabularyMessage(alert.Check, alert.Message);
     const href = safeHttpUrl(alert.Link);
 
     const diagnostic: Diagnostic = {
@@ -225,12 +249,12 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
       to,
       severity: getSeverity(alert.Severity),
       source: alert.Check,
-      message: alert.Message,
+      message: cleanMessage,
       actions,
       renderMessage: () => {
         const wrapper = document.createElement('span');
         const message = document.createElement('span');
-        message.textContent = alert.Message;
+        message.textContent = cleanMessage;
         wrapper.appendChild(message);
         if (href) {
           const link = document.createElement('a');
@@ -249,7 +273,7 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
   }, []);
 
   useEffect(() => {
-    callbacksRef.current = { onChange, onPositionsChange, onFixApplied };
+    callbacksRef.current = { onChange, onPositionsChange, onFixApplied, onAcceptTerm };
   });
 
   useEffect(() => {
@@ -373,14 +397,10 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
 
     view.dispatch(setDiagnostics(view.state, diagnostics));
 
-    const positions = new Map<number, AlertPosition>();
-    forEachDiagnostic(view.state, (diagnostic, from, to) => {
-      const id = alertIdsRef.current.get(diagnostic);
-      if (id !== undefined) positions.set(id, { from, to });
-    });
+    const positions = collectPositions(view);
     lastPositionsRef.current = positions;
     callbacksRef.current.onPositionsChange(positions);
-  }, [alerts, reviewedText, buildDiagnostic]);
+  }, [alerts, reviewedText, buildDiagnostic, collectPositions]);
 
   // The language changed: reword the placeholder, the accessible name and the fixes in the tooltips.
   // The diagnostics are rebuilt where they are now, so alerts keep their tracked positions.
@@ -432,8 +452,28 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
         const action = target?.diagnostic.actions?.[fixIndex];
         if (view && target && action) action.apply(view, target.from, target.to);
       },
+      dismiss: (ids) => {
+        const view = viewRef.current;
+        if (!view || ids.length === 0) return;
+        const gone = new Set(ids);
+
+        // Keep the others where they are now: the diagnostics hold their original positions
+        const kept: Diagnostic[] = [];
+        forEachDiagnostic(view.state, (diagnostic, from, to) => {
+          const id = alertIdsRef.current.get(diagnostic);
+          if (id === undefined || gone.has(id)) return;
+          const moved: Diagnostic = { ...diagnostic, from, to };
+          alertIdsRef.current.set(moved, id);
+          kept.push(moved);
+        });
+        view.dispatch(setDiagnostics(view.state, kept));
+
+        const positions = collectPositions(view);
+        lastPositionsRef.current = positions;
+        callbacksRef.current.onPositionsChange(positions);
+      },
     };
-  }, []);
+  }, [collectPositions]);
 
   return <div ref={hostRef} data-testid="editor" className={className} />;
 });

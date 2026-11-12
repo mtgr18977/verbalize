@@ -4,13 +4,17 @@ import type { CustomRule } from '@/types/lint';
 import {
   DRAFT_KEY,
   PREFS_KEY,
+  VOCABULARY_KEY,
   parseDraft,
   parsePrefs,
   readStorage,
+  readVocabulary,
   removeStorage,
   saveDraft,
   savePrefs,
+  saveVocabulary,
 } from '@/lib/draft-storage';
+import type { Vocabulary } from '@/types/vocabulary';
 
 /** Wait this long after the last edit before writing, so typing does not hit storage per key. */
 const SAVE_DELAY_MS = 600;
@@ -26,12 +30,15 @@ export interface RestoredDraft {
   customRules: CustomRule[];
   /** The style guide chosen last time, if any. */
   style: string | null;
+  /** The project vocabulary. Restored without a notice: it is configuration, not a draft. */
+  vocabulary: Vocabulary | null;
 }
 
 interface UseDraftAutosaveOptions {
   text: string;
   style: string;
   customRules: CustomRule[];
+  vocabulary: Vocabulary;
   /** Called once, while rendering, with what was found in storage. */
   onRestore: (draft: RestoredDraft) => void;
 }
@@ -65,11 +72,12 @@ function subscribeStorage(onChange: () => void): () => void {
  * Saving only starts after the stored draft has been read, otherwise the empty editor of a fresh
  * page load would overwrite the draft it is about to restore.
  */
-export function useDraftAutosave({ text, style, customRules, onRestore }: UseDraftAutosaveOptions): DraftAutosave {
+export function useDraftAutosave({ text, style, customRules, vocabulary, onRestore }: UseDraftAutosaveOptions): DraftAutosave {
   // false on the server and during hydration, true afterwards
   const hydrated = useSyncExternalStore(subscribeNoop, () => true, () => false);
   const rawDraft = useSyncExternalStore(subscribeStorage, () => readStorage(DRAFT_KEY), () => null);
   const rawPrefs = useSyncExternalStore(subscribeStorage, () => readStorage(PREFS_KEY), () => null);
+  const rawVocabulary = useSyncExternalStore(subscribeStorage, () => readStorage(VOCABULARY_KEY), () => null);
 
   const [restoreDone, setRestoreDone] = useState(false);
   const [enabled, setEnabledState] = useState(true);
@@ -83,8 +91,14 @@ export function useDraftAutosave({ text, style, customRules, onRestore }: UseDra
     if (!prefs.autosave) setStatus({ kind: 'off' });
 
     const draft = prefs.autosave ? parseDraft(rawDraft) : null;
-    if (draft || prefs.style) {
-      onRestore({ text: draft?.text ?? '', customRules: draft?.customRules ?? [], style: prefs.style });
+    const storedVocabulary = prefs.autosave ? readVocabulary(rawVocabulary) : null;
+    if (draft || prefs.style || storedVocabulary) {
+      onRestore({
+        text: draft?.text ?? '',
+        customRules: draft?.customRules ?? [],
+        style: prefs.style,
+        vocabulary: storedVocabulary,
+      });
     }
     if (draft && (draft.text.length > 0 || draft.customRules.length > 0)) {
       setRestored({ at: new Date(draft.savedAt), text: draft.text });
@@ -109,16 +123,25 @@ export function useDraftAutosave({ text, style, customRules, onRestore }: UseDra
     return () => window.clearTimeout(timer);
   }, [active, text, customRules]);
 
+  // The project vocabulary is kept like the draft: only while autosave is on
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setTimeout(() => saveVocabulary(vocabulary), SAVE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [active, vocabulary]);
+
   // Save right away when the page is hidden or closed: a timer may never get to run, and on
   // phones the browser can discard a background tab without warning.
-  const latestRef = useRef({ text, customRules, active });
+  const latestRef = useRef({ text, customRules, vocabulary, active });
   useEffect(() => {
-    latestRef.current = { text, customRules, active };
+    latestRef.current = { text, customRules, vocabulary, active };
   });
   useEffect(() => {
     const flush = (): void => {
       const latest = latestRef.current;
-      if (latest.active) saveDraft(latest.text, latest.customRules);
+      if (!latest.active) return;
+      saveDraft(latest.text, latest.customRules);
+      saveVocabulary(latest.vocabulary);
     };
     const onVisibility = (): void => {
       if (document.visibilityState === 'hidden') flush();
@@ -142,6 +165,7 @@ export function useDraftAutosave({ text, style, customRules, onRestore }: UseDra
       setStatus({ kind: 'idle' });
     } else {
       removeStorage(DRAFT_KEY);
+      removeStorage(VOCABULARY_KEY);
       setRestored(null);
       setStatus({ kind: 'off' });
     }

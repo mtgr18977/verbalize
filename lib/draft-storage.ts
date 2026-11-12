@@ -1,4 +1,7 @@
+import { parseStoredVocabulary } from '@/lib/vocabulary';
 import type { CustomRule } from '@/types/lint';
+import { EMPTY_VOCABULARY } from '@/types/vocabulary';
+import type { Vocabulary } from '@/types/vocabulary';
 
 /**
  * Browser storage for the draft and the preferences. Everything here is defensive: storage can be
@@ -7,6 +10,7 @@ import type { CustomRule } from '@/types/lint';
 
 export const DRAFT_KEY = 'verbalize:draft:v1';
 export const PREFS_KEY = 'verbalize:prefs:v1';
+export const VOCABULARY_KEY = 'verbalize:vocabulary:v1';
 
 // Same limits as the API (lib/lint-guards.ts), repeated here because that module is server-only
 const MAX_RULES = 10;
@@ -123,4 +127,26 @@ export function saveDraft(text: string, customRules: CustomRule[], now: number =
 
 export function savePrefs(prefs: StoredPrefs): void {
   writeStorage(PREFS_KEY, JSON.stringify(prefs));
+}
+
+export function isDefaultVocabulary(vocabulary: Vocabulary): boolean {
+  return (
+    vocabulary.accept.length === 0 &&
+    vocabulary.reject.length === 0 &&
+    vocabulary.spelling === EMPTY_VOCABULARY.spelling &&
+    vocabulary.enforceCase === EMPTY_VOCABULARY.enforceCase
+  );
+}
+
+/** Saves the vocabulary, or removes it when it is back to the defaults. Returns false if the browser refused. */
+export function saveVocabulary(vocabulary: Vocabulary): boolean {
+  if (isDefaultVocabulary(vocabulary)) {
+    removeStorage(VOCABULARY_KEY);
+    return true;
+  }
+  return writeStorage(VOCABULARY_KEY, JSON.stringify(vocabulary));
+}
+
+export function readVocabulary(raw: string | null): Vocabulary | null {
+  return parseStoredVocabulary(raw);
 }

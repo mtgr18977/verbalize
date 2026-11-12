@@ -27,6 +27,48 @@ export const ptBR: Record<keyof typeof en, string> = {
     'O texto e as regras ficam neste aparelho e só saem dele para serem revisados. Desative em computadores compartilhados: isso também apaga o rascunho salvo.',
   'settings.language': 'Language / Idioma',
 
+  'settings.vocabulary': 'Vocabulário',
+
+  'vocab.title': 'Vocabulário do projeto',
+  'vocab.open': 'Editar vocabulário',
+  'vocab.summary': 'Aceitos: {accepted} · Rejeitados: {rejected}',
+  'vocab.spellingOn': 'Ortografia ligada',
+  'vocab.spellingOff': 'Ortografia desligada',
+  'vocab.intro':
+    'Termos específicos do seu projeto, guardados como arquivos de vocabulário do Vale (accept.txt e reject.txt) que você também pode usar no seu repositório.',
+  'vocab.acceptTitle': 'Termos aceitos',
+  'vocab.acceptHelp':
+    'Um por linha. Escritos e com as maiúsculas exatamente assim: nunca são erro de ortografia, e o Vale cobra essa capitalização.',
+  'vocab.rejectTitle': 'Termos rejeitados',
+  'vocab.rejectHelp': 'Um por linha. Termos a evitar, com qualquer capitalização. São sempre apontados.',
+  'vocab.count': '{count} de {max}',
+  'vocab.spelling': 'Verificar ortografia',
+  'vocab.spellingHelp':
+    'Usa o dicionário de inglês do Vale. Ele aponta nomes de produtos e jargões até você incluí-los nos termos aceitos.',
+  'vocab.enforceCase': 'Cobrar a capitalização dos termos aceitos',
+  'vocab.enforceCaseHelp': 'Aponta “kubernetes” quando “Kubernetes” é um termo aceito.',
+  'vocab.import': 'Importar',
+  'vocab.importLabel': 'Importar {list} de um arquivo .txt',
+  'vocab.download': 'Baixar',
+  'vocab.downloadLabel': 'Baixar {file}',
+  'vocab.done': 'Concluir',
+  'vocab.close': 'Fechar',
+  'vocab.issue.too_long': '“{term}” tem mais de {max} caracteres.',
+  'vocab.issue.edge_symbol':
+    '“{term}” começa ou termina com um símbolo. O Vale só reconhece termos que começam e terminam com letra ou dígito, então este nunca seria encontrado.',
+  'vocab.issue.duplicate': '“{term}” aparece mais de uma vez.',
+  'vocab.issue.case_conflict': '“{term}” só difere em maiúsculas de outro termo aceito.',
+  'vocab.issuesMore_one': 'e mais {count} problema',
+  'vocab.issuesMore_other': 'e mais {count} problemas',
+  'vocab.imported_one': '{count} termo importado.',
+  'vocab.imported_other': '{count} termos importados.',
+  'vocab.importEmpty': 'Nenhum termo encontrado nesse arquivo.',
+  'vocab.importSkipped_one': '{count} linha parece uma expressão regular e não foi importada: {lines}',
+  'vocab.importSkipped_other': '{count} linhas parecem expressões regulares e não foram importadas: {lines}',
+  'vocab.acceptTerm': 'Aceitar “{term}”',
+  'vocab.tooMany': 'Só os primeiros {max} termos são usados.',
+  'vocab.full': 'A lista de termos aceitos está cheia ({max} termos). Remova um para incluir outro.',
+
   'header.run': 'Revisar',
   'header.running': 'Analisando…',
   'header.runTitle': 'Revisar (Ctrl/⌘ + Enter)',
@@ -65,7 +107,7 @@ export const ptBR: Record<keyof typeof en, string> = {
   'alerts.staleText':
     'O texto mudou depois da última revisão. Os alertas acompanham suas edições, e os que você editou ficam marcados. Pressione {run} (Ctrl+Enter) para atualizar.',
   'alerts.staleRules':
-    'O guia de estilo ou as regras personalizadas mudaram depois da última revisão. Pressione {run} (Ctrl+Enter) para atualizar.',
+    'O guia de estilo, as regras personalizadas ou o vocabulário mudaram depois da última revisão. Pressione {run} (Ctrl+Enter) para atualizar.',
   'alerts.edited': 'texto editado',
   'alerts.styleGuide': 'Guia de estilo',
   'alerts.styleGuideLabel': 'Abrir a página do guia de estilo para {rule}',
@@ -114,4 +156,7 @@ export const ptBR: Record<keyof typeof en, string> = {
   'api.vale_failed': 'Não foi possível executar o revisor. Tente de novo.',
   'api.parse_failed': 'O revisor devolveu um resultado que não pôde ser lido.',
   'api.internal': 'Algo deu errado no servidor. Tente de novo.',
+  'api.vocabulary_invalid': 'O vocabulário não é válido.',
+  'api.vocabulary_too_many': 'O vocabulário tem termos demais. O máximo é {max} por lista.',
+  'api.vocabulary_term_too_long': 'Um termo do vocabulário tem mais de {max} caracteres.',
 };

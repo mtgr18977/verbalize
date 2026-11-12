@@ -26,6 +26,48 @@ export const en = {
     'The text and rules stay on this device and are never sent anywhere except to be reviewed. Turn this off on a shared computer: it also deletes the saved draft.',
   'settings.language': 'Language / Idioma',
 
+  'settings.vocabulary': 'Vocabulary',
+
+  'vocab.title': 'Project vocabulary',
+  'vocab.open': 'Edit vocabulary',
+  'vocab.summary': 'Accepted: {accepted} · Rejected: {rejected}',
+  'vocab.spellingOn': 'Spelling on',
+  'vocab.spellingOff': 'Spelling off',
+  'vocab.intro':
+    'Terms specific to your project, kept as Vale vocabulary files (accept.txt and reject.txt) that you can also use in your repository.',
+  'vocab.acceptTitle': 'Accepted terms',
+  'vocab.acceptHelp':
+    'One per line. Spelled and capitalized exactly like this: never a spelling mistake, and Vale asks for this capitalization.',
+  'vocab.rejectTitle': 'Rejected terms',
+  'vocab.rejectHelp': 'One per line. Terms to avoid, in any capitalization. They are always reported.',
+  'vocab.count': '{count} of {max}',
+  'vocab.spelling': 'Check spelling',
+  'vocab.spellingHelp':
+    "Uses Vale's English dictionary. It flags product names and jargon until you add them to the accepted terms.",
+  'vocab.enforceCase': 'Ask for the capitalization of accepted terms',
+  'vocab.enforceCaseHelp': 'Reports “kubernetes” when “Kubernetes” is an accepted term.',
+  'vocab.import': 'Import',
+  'vocab.importLabel': 'Import {list} from a .txt file',
+  'vocab.download': 'Download',
+  'vocab.downloadLabel': 'Download {file}',
+  'vocab.done': 'Done',
+  'vocab.close': 'Close',
+  'vocab.issue.too_long': '“{term}” is longer than {max} characters.',
+  'vocab.issue.edge_symbol':
+    '“{term}” starts or ends with a symbol. Vale only matches terms that start and end with a letter or digit, so this one would never match.',
+  'vocab.issue.duplicate': '“{term}” appears more than once.',
+  'vocab.issue.case_conflict': '“{term}” differs only in capitalization from another accepted term.',
+  'vocab.issuesMore_one': 'and {count} more problem',
+  'vocab.issuesMore_other': 'and {count} more problems',
+  'vocab.imported_one': '{count} term imported.',
+  'vocab.imported_other': '{count} terms imported.',
+  'vocab.importEmpty': 'No terms found in that file.',
+  'vocab.importSkipped_one': '{count} line looks like a regular expression and was not imported: {lines}',
+  'vocab.importSkipped_other': '{count} lines look like regular expressions and were not imported: {lines}',
+  'vocab.acceptTerm': 'Accept “{term}”',
+  'vocab.tooMany': 'Only the first {max} terms are used.',
+  'vocab.full': 'The accepted terms list is full ({max} terms). Remove one to add another.',
+
   'header.run': 'Run Linting',
   'header.running': 'Analyzing...',
   'header.runTitle': 'Run Linting (Ctrl/⌘ + Enter)',
@@ -64,7 +106,7 @@ export const en = {
   'alerts.staleText':
     'The text changed after the last review. Alerts follow your edits, and the ones you edited are marked. Press {run} (Ctrl+Enter) to refresh.',
   'alerts.staleRules':
-    'The style guide or custom rules changed after the last review. Press {run} (Ctrl+Enter) to refresh.',
+    'The style guide, custom rules or vocabulary changed after the last review. Press {run} (Ctrl+Enter) to refresh.',
   'alerts.edited': 'text edited',
   'alerts.styleGuide': 'Style guide',
   'alerts.styleGuideLabel': 'Open the style guide page for {rule}',
@@ -113,4 +155,7 @@ export const en = {
   'api.vale_failed': 'The linter failed to run. Try again.',
   'api.parse_failed': 'The linter returned a result that could not be read.',
   'api.internal': 'Something went wrong on the server. Try again.',
+  'api.vocabulary_invalid': 'The vocabulary is not valid.',
+  'api.vocabulary_too_many': 'The vocabulary has too many terms. The maximum is {max} per list.',
+  'api.vocabulary_term_too_long': 'A vocabulary term is longer than {max} characters.',
 } as const;

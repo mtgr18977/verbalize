@@ -35,7 +35,8 @@ verbalize/
 │   └── page.tsx                  # Main application interface
 ├── components/
 │   ├── draft-status.tsx          # "Saved" label and the restored-draft notice
-│   └── lint-editor.tsx           # CodeMirror 6 editor with Vale diagnostics
+│   ├── lint-editor.tsx           # CodeMirror 6 editor with Vale diagnostics
+│   └── vocabulary-dialog.tsx     # Editor of the project vocabulary (native <dialog>)
 ├── hooks/
 │   └── use-draft-autosave.ts     # Saves and restores the draft in localStorage
 ├── i18n/
@@ -49,10 +50,13 @@ verbalize/
 │   ├── draft-storage.ts          # Defensive localStorage helpers and draft parsing
 │   ├── api-errors.ts             # Error codes of /api/lint, shared with the interface
 │   ├── lint-guards.ts            # Limits and request guards for /api/lint
+│   ├── vale-config.ts            # Builds the .vale.ini of one request
+│   ├── vocabulary.ts             # Escaping, validation, import and files of the project vocabulary
 │   ├── vale-fixes.ts             # One-click fixes derived from Vale's `Action`
 │   └── safe-url.ts               # Only http(s) links reach an href
 ├── types/
-│   └── lint.ts                   # Vale alert types shared by the UI and the editor
+│   ├── lint.ts                   # Vale alert types shared by the UI and the editor
+│   └── vocabulary.ts             # The project vocabulary
 ├── styles/
 │   ├── Google/                   # Google Developer Documentation Style Guide
 │   ├── Microsoft/                # Microsoft Writing Style Guide
@@ -326,7 +330,7 @@ npx playwright show-report
 
 ### Autosave (drafts)
 
-- `hooks/use-draft-autosave.ts` keeps the text and the uploaded rules under `verbalize:draft:v1`, and the style guide and the autosave choice under `verbalize:prefs:v1`. The draft is restored on load with a notice ("Restored your draft from ..."); reviews are never stored, because they would describe text that may have changed.
+- `hooks/use-draft-autosave.ts` keeps the text and the uploaded rules under `verbalize:draft:v1`, the project vocabulary under `verbalize:vocabulary:v1`, and the style guide and the autosave choice under `verbalize:prefs:v1`. The draft is restored on load with a notice ("Restored your draft from ..."); reviews are never stored, because they would describe text that may have changed.
 - Saving starts only after the stored draft has been read. Never save before restoring: the empty editor of a fresh load would overwrite the draft.
 - Writes are debounced (600 ms) and flushed on `pagehide` and when the page becomes hidden. Identical content is not rewritten, so a draft keeps its original time. Clearing the editor removes the stored draft.
 - Every storage call is wrapped: blocked or full storage shows "Not saved" and the editor keeps working; unreadable or malformed data is ignored (`parseDraft` validates shape and limits).
@@ -344,6 +348,16 @@ npx playwright show-report
 - What is deliberately not translated: Vale's messages and rule names (the style guides check English text; the settings say so), the product name, and `public/example-style.yml`.
 - Dates and times use `formatTime` and `formatDateTime` from `useI18n`, not the browser default.
 - In tests find the editor with `editor(page)` from `tests/helpers/editor.ts`: its accessible name depends on the language. Playwright's default locale is `en-US`, so the existing tests run in English; use `test.use({ locale: 'pt-BR' })` for Portuguese.
+
+### Project vocabulary
+
+- The vocabulary is two lists of terms (accepted, rejected) and two switches (check spelling, ask for the capitalization of accepted terms). It reaches Vale as its own vocabulary files: `styles/config/vocabularies/Project/accept.txt` and `reject.txt`, written into the request's temporary folder, with `Vocab = Project` in the generated `.vale.ini` (`lib/vale-config.ts`). The exported files are exactly what Vale reads, so they also work in a repository.
+- Vale reads vocabulary entries as regular expressions and wraps each in `\b...\b`. Three rules follow from measuring Vale 3.9.5, and `lib/vocabulary.ts` implements them: terms are always written **escaped**, because a malformed expression makes Vale fail and some crash it (a bad `reject.txt` is a segfault); rejected terms get `(?i)`, because `reject` is otherwise case sensitive; and a term that starts or ends with a symbol (`C++`, `.NET`) can **never match**, so the dialog reports it instead of accepting it silently and `usableTerms` keeps it out of the request.
+- The built-in `Vale` style (Spelling, Terms, Avoid, Repetition) is switched on only when there are usable terms or spelling was asked for, so nobody gets alerts they did not ask for. `Vale.Repetition` is always off, and `Vale.Spelling` is off unless the switch is on: it flags every product name until the jargon is in the accepted terms.
+- `Vale.Terms` and `Vale.Avoid` carry no `Action`. The capitalization `Vale.Terms` asks for is read from its message (`getAlertFixes`), and its message prints the term as a pattern (`Node\.js`), so the interface unescapes it (`cleanVocabularyMessage`). Spelling alerts offer "Accept 'word'", which adds the word to the accepted terms and clears every alert for that word.
+- Limits (`MAX_VOCABULARY_TERMS` 500 per list, 80 characters per term) come from timing Vale: its cost follows the number of terms, not the size of the document (500 terms ~0.5 s, 1000 ~1.4 s, 3000 ~8.5 s). The API answers `vocabulary_invalid`, `vocabulary_too_many` and `vocabulary_term_too_long`.
+- Import reads Verbalize's own files back and skips lines with real regular expression syntax (reporting them), rather than turning them into literals that would never match what their author meant.
+- The vocabulary is stored under `verbalize:vocabulary:v1` and follows the autosave switch like the draft; "Start fresh" keeps it, because it is configuration. Changing it after a review marks the result out of date.
 
 ### Design Constraints
 

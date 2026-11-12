@@ -19,6 +19,9 @@ import {
 } from '@/lib/lint-guards';
 import type { CustomRule, LintRequest } from '@/lib/lint-guards';
 import type { ApiErrorBody } from '@/lib/api-errors';
+import { VOCABULARY_NAME, buildValeIni } from '@/lib/vale-config';
+import { buildVocabularyFiles, hasTerms } from '@/lib/vocabulary';
+import type { Vocabulary } from '@/types/vocabulary';
 
 const execFileAsync = promisify(execFile);
 
@@ -46,7 +49,18 @@ function safeRuleFileName(name: string, used: Set<string>): string | null {
   return candidate;
 }
 
-async function writeStyles(tmpDir: string, style: string, customRules: CustomRule[]): Promise<string> {
+/** Writes accept.txt and reject.txt where Vale looks for the `Project` vocabulary. */
+async function writeVocabulary(stylesDir: string, vocabulary: Vocabulary): Promise<void> {
+  if (!hasTerms(vocabulary)) return;
+  const folder = path.join(stylesDir, 'config', 'vocabularies', VOCABULARY_NAME);
+  await fs.mkdir(folder, { recursive: true });
+  const files = buildVocabularyFiles(vocabulary);
+  await fs.writeFile(path.join(folder, 'accept.txt'), files.accept);
+  await fs.writeFile(path.join(folder, 'reject.txt'), files.reject);
+}
+
+/** Prepares the styles folder of one request. Returns whether a "Custom" style was written. */
+async function writeStyles(tmpDir: string, customRules: CustomRule[], vocabulary: Vocabulary): Promise<boolean> {
   const tempStylesDir = path.join(tmpDir, 'styles');
   await fs.mkdir(tempStylesDir, { recursive: true });
 
@@ -55,7 +69,8 @@ async function writeStyles(tmpDir: string, style: string, customRules: CustomRul
   try {
     for (const styleFolder of await fs.readdir(stylesPath)) {
       const fullPath = path.join(stylesPath, styleFolder);
-      if ((await fs.stat(fullPath)).isDirectory()) {
+      // "config" is where vocabularies live: a repository folder of that name must not shadow it
+      if (styleFolder !== 'config' && (await fs.stat(fullPath)).isDirectory()) {
         await fs.symlink(fullPath, path.join(tempStylesDir, styleFolder), process.platform === 'win32' ? 'junction' : 'dir');
       }
     }
@@ -63,7 +78,8 @@ async function writeStyles(tmpDir: string, style: string, customRules: CustomRul
     console.warn('Failed to symlink existing styles:', err);
   }
 
-  if (customRules.length === 0) return style;
+  await writeVocabulary(tempStylesDir, vocabulary);
+  if (customRules.length === 0) return false;
 
   const customStyleDir = path.join(tempStylesDir, 'Custom');
   await fs.mkdir(customStyleDir, { recursive: true });
@@ -79,16 +95,24 @@ async function writeStyles(tmpDir: string, style: string, customRules: CustomRul
       await fs.writeFile(path.join(customStyleDir, fileName), rule.content);
     }
   }
-  return `${style}, Custom`;
+  return true;
 }
 
 async function runVale(tmpDir: string, request: LintRequest): Promise<unknown[]> {
   const tmpFile = path.join(tmpDir, 'doc.md');
   await fs.writeFile(tmpFile, request.text);
 
-  const basedOnStyles = await writeStyles(tmpDir, request.style, request.customRules);
+  const hasCustomRules = await writeStyles(tmpDir, request.customRules, request.vocabulary);
   const iniFile = path.join(tmpDir, '.vale.ini');
-  await fs.writeFile(iniFile, `StylesPath = ${path.join(tmpDir, 'styles')}\nMinAlertLevel = suggestion\n[*.md]\nBasedOnStyles = ${basedOnStyles}\n`);
+  await fs.writeFile(
+    iniFile,
+    buildValeIni({
+      stylesPath: path.join(tmpDir, 'styles'),
+      style: request.style,
+      hasCustomRules,
+      vocabulary: request.vocabulary,
+    })
+  );
 
   const valePath = path.join(process.cwd(), process.platform === 'win32' ? 'vale.exe' : 'vale');
 
