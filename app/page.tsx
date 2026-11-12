@@ -23,6 +23,8 @@ import { DEFAULT_FORMAT, DOCUMENT_ACCEPT, detectFormat } from '@/lib/document-fo
 import type { DocumentFormat } from '@/lib/document-format';
 import { describeFix, getAlertFixes } from '@/lib/vale-fixes';
 import { MAX_IGNORED_RULES, buildIgnoreLines, isRuleName } from '@/lib/ignored-rules';
+import { MAX_SEVERITY_OVERRIDES, RULE_SEVERITIES, buildSeverityLines, isRuleSeverity } from '@/lib/rule-severity';
+import type { RuleSeverity, SeverityOverrides } from '@/lib/rule-severity';
 import { MAX_VOCABULARY_TERMS, cleanVocabularyMessage, usableTerms } from '@/lib/vocabulary';
 import { safeHttpUrl } from '@/lib/safe-url';
 
@@ -106,11 +108,18 @@ function getDesktopServerSnapshot(): boolean {
   return true;
 }
 
-/** Everything besides the text that changes what a review finds: the rules, the vocabulary and the ignored rules. */
-function getRulesKey(rules: CustomRule[], vocabulary: Vocabulary, format: DocumentFormat, ignoredRules: readonly string[]): string {
+/** Everything besides the text that changes what a review finds: the rules, the vocabulary, the ignored rules and the severities. */
+function getRulesKey(
+  rules: CustomRule[],
+  vocabulary: Vocabulary,
+  format: DocumentFormat,
+  ignoredRules: readonly string[],
+  severities: SeverityOverrides
+): string {
   const rulesKey = rules.map((rule) => `${rule.name}\u0000${rule.content}`).join('\u0001');
   const vocabularyKey = JSON.stringify([usableTerms(vocabulary.accept), usableTerms(vocabulary.reject), vocabulary.spelling, vocabulary.enforceCase]);
-  return `${rulesKey}\u0002${vocabularyKey}\u0002${format}\u0002${[...ignoredRules].sort().join(',')}`;
+  const severitiesKey = buildSeverityLines(severities).sort().join(',');
+  return `${rulesKey}\u0002${vocabularyKey}\u0002${format}\u0002${[...ignoredRules].sort().join(',')}\u0002${severitiesKey}`;
 }
 
 function getSeverityTone(severity: string): SeverityTone {
@@ -190,6 +199,11 @@ export default function Home() {
   const [vocabularyOpen, setVocabularyOpen] = useState(false);
   // Rules the user switched off (`Style.Rule`): sent with every review and kept in this browser
   const [ignoredRules, setIgnoredRules] = useState<string[]>([]);
+  // The severity the user gave to rules (`Style.Rule`): sent with every review and kept in this browser
+  const [severities, setSeverities] = useState<SeverityOverrides>({});
+  // The part of it already shown on the current alerts. A review comes back with it applied, so this
+  // starts empty with every review; changing a severity applies it to the alerts on screen at once.
+  const [appliedSeverities, setAppliedSeverities] = useState<SeverityOverrides>({});
   const [results, setResults] = useState<ReviewAlert[]>([]);
   // Alerts fixed with one click: hidden from the list until the next review
   const [resolvedIds, setResolvedIds] = useState<ReadonlySet<number>>(() => new Set());
@@ -220,11 +234,13 @@ export default function Home() {
     customRules,
     vocabulary,
     ignoredRules,
+    severities,
     onRestore: (restored) => {
       setText(restored.text);
       setCustomRules(restored.customRules);
       if (restored.vocabulary) setVocabulary(restored.vocabulary);
       if (restored.ignoredRules) setIgnoredRules(restored.ignoredRules);
+      if (restored.severities) setSeverities(restored.severities);
       if (restored.format) setFormat(restored.format);
       if (restored.style && STYLE_OPTIONS.some((option) => option.value === restored.style)) setStyle(restored.style);
     },
@@ -288,12 +304,15 @@ export default function Home() {
             enforceCase: vocabulary.enforceCase,
           },
           ignoredRules,
+          severities,
         }),
       });
       const data = await response.json();
       if (response.ok && Array.isArray(data)) {
         setResults((data as ValeAlert[]).map((alert, id) => ({ ...alert, id })));
-        setSnapshot({ text: normalizedText, style, rulesKey: getRulesKey(customRules, vocabulary, format, ignoredRules), at: new Date() });
+        // the server already applied the severities of the rules
+        setAppliedSeverities({});
+        setSnapshot({ text: normalizedText, style, rulesKey: getRulesKey(customRules, vocabulary, format, ignoredRules, severities), at: new Date() });
         // On a phone the results are on another tab: take the user there
         if (!window.matchMedia(DESKTOP_QUERY).matches) setView('alerts');
       } else {
@@ -308,7 +327,7 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [loading, text, style, format, customRules, vocabulary, ignoredRules, t, toast]);
+  }, [loading, text, style, format, customRules, vocabulary, ignoredRules, severities, t, toast]);
 
   useEffect(() => {
     lintRef.current = handleLint;
@@ -435,7 +454,7 @@ export default function Home() {
 
   const handleAlertClick = (alert: ReviewAlert, e: React.MouseEvent) => {
     // Prevent the click from being handled by parent elements if we clicked a link or a button
-    if ((e.target as HTMLElement).closest('a, button')) return;
+    if ((e.target as HTMLElement).closest('a, button, select')) return;
 
     e.preventDefault();
     e.stopPropagation();
@@ -497,8 +516,8 @@ export default function Home() {
     setResolvedIds(new Set([...resolvedIds, ...hidden]));
     editorHandleRef.current?.dismiss(hidden);
     // Only a review that was current stays current: a stale one is stale for other reasons too
-    const before = getRulesKey(customRules, vocabulary, format, ignoredRules);
-    const after = getRulesKey(customRules, vocabulary, format, next);
+    const before = getRulesKey(customRules, vocabulary, format, ignoredRules, severities);
+    const after = getRulesKey(customRules, vocabulary, format, next, severities);
     setSnapshot((current) => (current && current.rulesKey === before ? { ...current, rulesKey: after } : current));
 
     toast.notify({
@@ -515,8 +534,8 @@ export default function Home() {
     hidden.forEach((id) => stillResolved.delete(id));
     setIgnoredRules(next);
     setResolvedIds(stillResolved);
-    const before = getRulesKey(customRules, vocabulary, format, ignoredRules);
-    const after = getRulesKey(customRules, vocabulary, format, next);
+    const before = getRulesKey(customRules, vocabulary, format, ignoredRules, severities);
+    const after = getRulesKey(customRules, vocabulary, format, next, severities);
     setSnapshot((current) => (current && current.rulesKey === before ? { ...current, rulesKey: after } : current));
     // The underlines come back only while the document is still the reviewed one, and without the
     // alerts that were resolved for other reasons. A new array is what makes the editor draw again.
@@ -533,9 +552,36 @@ export default function Home() {
     setIgnoredRules((previous) => previous.filter((candidate) => candidate !== rule));
   };
 
-  const copyIgnoredRules = async (): Promise<void> => {
+  /**
+   * Gives a rule another severity. A severity belongs to the rule, not to the text, so it is shown
+   * on the alerts on screen at once, even if the text was edited since the review. The review stays
+   * current if it was, like ignoring a rule: that is what the next review would give.
+   */
+  const changeSeverity = (rule: string, severity: RuleSeverity): void => {
+    if (!isRuleName(rule) || severities[rule] === severity) return;
+    if (!(rule in severities) && Object.keys(severities).length >= MAX_SEVERITY_OVERRIDES) {
+      toast.notify({ id: 'severity-full', kind: 'error', message: t('severity.full', { max: MAX_SEVERITY_OVERRIDES }) });
+      return;
+    }
+
+    const next: SeverityOverrides = { ...severities, [rule]: severity };
+    const before = getRulesKey(customRules, vocabulary, format, ignoredRules, severities);
+    const after = getRulesKey(customRules, vocabulary, format, ignoredRules, next);
+    setSeverities(next);
+    setAppliedSeverities((previous) => ({ ...previous, [rule]: severity }));
+    setSnapshot((current) => (current && current.rulesKey === before ? { ...current, rulesKey: after } : current));
+  };
+
+  /** Back to the severity the style guide gives the rule. It is known only after a new review, so the review is out of date. */
+  const resetSeverity = (rule: string): void => {
+    setSeverities((previous) => Object.fromEntries(Object.entries(previous).filter(([name]) => name !== rule)));
+  };
+
+  const copyRuleLines = async (): Promise<void> => {
     try {
-      await navigator.clipboard.writeText(buildIgnoreLines(ignoredRules).join('\n'));
+      // Ignored rules first: Vale keeps the first line of a key, so a rule that is also ignored
+      // stays off, as in the file the server writes
+      await navigator.clipboard.writeText([...buildIgnoreLines(ignoredRules), ...buildSeverityLines(severities)].join('\n'));
       toast.notify({ id: 'ignored-copied', message: t('ignore.copied') });
     } catch {
       toast.notify({ id: 'ignored-copied', kind: 'error', message: t('ignore.copyFailed') });
@@ -565,9 +611,10 @@ export default function Home() {
   const normalizedText = text.replace(/\r\n/g, '\n');
   const isStale =
     snapshot !== null &&
-    (snapshot.text !== normalizedText || snapshot.style !== style || snapshot.rulesKey !== getRulesKey(customRules, vocabulary, format, ignoredRules));
+    (snapshot.text !== normalizedText || snapshot.style !== style || snapshot.rulesKey !== getRulesKey(customRules, vocabulary, format, ignoredRules, severities));
   const textChanged = snapshot !== null && snapshot.text !== normalizedText;
   const styleLabel = STYLE_OPTIONS.find((option) => option.value === style)?.label ?? style;
+  const severityEntries = Object.entries(severities);
   const visibleAlerts = useMemo(() => results.filter((alert) => !resolvedIds.has(alert.id)), [results, resolvedIds]);
   const currentLines = useMemo(() => normalizedText.split('\n'), [normalizedText]);
   const reviewedLines = useMemo(() => (snapshot ? snapshot.text.split('\n') : []), [snapshot]);
@@ -827,13 +874,53 @@ export default function Home() {
                   ))}
                 </ul>
                 <p className="text-xs text-ink-2">{t('ignore.help')}</p>
-                <button onClick={() => void copyIgnoredRules()} className={secondaryButton}>
-                  <Copy className="h-4 w-4" />
-                  <span>{t('ignore.copy')}</span>
-                </button>
               </>
             )}
           </div>
+
+          {/* Severities */}
+          <div data-testid="rule-severities" className="space-y-2">
+            <span className="block text-xs font-semibold text-ink-2">{t('settings.ruleSeverities')}</span>
+            {severityEntries.length === 0 ? (
+              <p className="text-xs text-ink-2">{t('severity.none')}</p>
+            ) : (
+              <>
+                <p data-testid="severity-summary" className="text-sm text-ink">{t('severity.summary', { count: severityEntries.length })}</p>
+                <ul className="border-t border-rule">
+                  {severityEntries.map(([rule, level]) => (
+                    <li key={rule} className="flex items-center gap-2 border-b border-rule py-1.5">
+                      <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink">{rule}</span>
+                      {/* 16 px on phones: smaller text makes iOS zoom the page when a field is focused */}
+                      <select
+                        aria-label={t('severity.change', { rule })}
+                        value={level}
+                        onChange={(e) => {
+                          if (isRuleSeverity(e.target.value)) changeSeverity(rule, e.target.value);
+                        }}
+                        className="cursor-pointer border border-rule bg-paper px-1.5 py-1.5 text-base text-ink lg:py-0.5 lg:text-xs"
+                      >
+                        {RULE_SEVERITIES.map((option) => (
+                          <option key={option} value={option}>{getSeverityLabel(option, t)}</option>
+                        ))}
+                      </select>
+                      <button onClick={() => resetSeverity(rule)} aria-label={t('severity.reset', { rule })} className="p-2 text-ink-2 hover:text-err lg:p-1">
+                        <X className="h-4 w-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-xs text-ink-2">{t('severity.help')}</p>
+              </>
+            )}
+          </div>
+
+          {/* One copy for both lists: the lines are what the server writes, so they work in a repository */}
+          {(severityEntries.length > 0 || ignoredRules.length > 0) && (
+            <button onClick={() => void copyRuleLines()} className={secondaryButton}>
+              <Copy className="h-4 w-4" />
+              <span>{t('ignore.copy')}</span>
+            </button>
+          )}
 
           {/* Drafts */}
           <div className="space-y-2">
@@ -969,6 +1056,7 @@ export default function Home() {
                 onFixApplied={markResolved}
                 onAcceptTerm={acceptTerm}
                 onIgnoreRule={ignoreRule}
+                severityOverrides={appliedSeverities}
                 format={format}
                 placeholderText={t(format === 'asciidoc' ? 'editor.placeholderAsciidoc' : 'editor.placeholder')}
                 ariaLabel={t('editor.ariaLabel')}
@@ -1013,7 +1101,9 @@ export default function Home() {
                     // The editor reports where the alert is now; no position means its text was edited
                     const live = positions.get(alert.id);
                     const stale = textChanged && !live;
-                    const tone = getSeverityTone(alert.Severity);
+                    // What the user set since the review wins over what Vale said
+                    const severity = appliedSeverities[alert.Check] ?? alert.Severity;
+                    const tone = getSeverityTone(severity);
                     let line = alert.Line;
                     let span: [number, number] = alert.Span;
                     if (live) {
@@ -1032,13 +1122,13 @@ export default function Home() {
                       <li
                         key={alert.id}
                         data-testid="alert-card"
-                        data-severity={alert.Severity}
+                        data-severity={severity}
                         onClick={stale ? undefined : (e) => handleAlertClick(alert, e)}
                         className={`border-b border-rule px-4 py-3 ${stale ? '' : 'cursor-pointer hover:bg-select'}`}
                       >
                         <div className="flex items-baseline gap-3 text-xs">
                           <span className={`font-mono font-semibold underline decoration-[1.5px] underline-offset-4 ${tone.text} ${tone.decoration}`}>
-                            {getSeverityLabel(alert.Severity, t)}
+                            {getSeverityLabel(severity, t)}
                           </span>
                           <span className="min-w-0 truncate font-mono text-ink-2">{alert.Check}</span>
                           <span className="ml-auto shrink-0 font-mono text-ink-2">
@@ -1070,6 +1160,24 @@ export default function Home() {
                               >
                                 {t('vocab.acceptTerm', { term: alert.Match })}
                               </button>
+                            )}
+                            {canIgnore && (
+                              <label className="flex items-center gap-1.5 text-xs font-semibold text-ink-2">
+                                <span>{t('severity.field')}</span>
+                                <select
+                                  data-action="severity"
+                                  aria-label={t('severity.change', { rule: alert.Check })}
+                                  value={isRuleSeverity(severity) ? severity : 'suggestion'}
+                                  onChange={(e) => {
+                                    if (isRuleSeverity(e.target.value)) changeSeverity(alert.Check, e.target.value);
+                                  }}
+                                  className="min-h-9 cursor-pointer border border-rule bg-paper px-1.5 text-base font-semibold text-ink lg:min-h-0 lg:py-0.5 lg:text-xs"
+                                >
+                                  {RULE_SEVERITIES.map((option) => (
+                                    <option key={option} value={option}>{getSeverityLabel(option, t)}</option>
+                                  ))}
+                                </select>
+                              </label>
                             )}
                             {canIgnore && (
                               <button

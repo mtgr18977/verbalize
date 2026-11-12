@@ -54,6 +54,11 @@ interface LintEditorProps {
   onAcceptTerm: (id: number) => void;
   /** The user chose to ignore the rule of an alert (`Style.Rule`). */
   onIgnoreRule: (rule: string) => void;
+  /**
+   * Severity the user gave to rules since the review, by `Style.Rule`. It wins over the severity
+   * in the alert, so the underline changes shape at once and keeps its tracked position.
+   */
+  severityOverrides: Readonly<Record<string, string>>;
   /** Decides the syntax highlighting. */
   format: DocumentFormat;
   placeholderText: string;
@@ -215,7 +220,7 @@ function runFix(view: EditorView, from: number, to: number, fix: Fix): void {
 }
 
 export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function LintEditor(
-  { value, onChange, alerts, reviewedText, onPositionsChange, onFixApplied, onAcceptTerm, onIgnoreRule, format, placeholderText, ariaLabel, className },
+  { value, onChange, alerts, reviewedText, onPositionsChange, onFixApplied, onAcceptTerm, onIgnoreRule, severityOverrides, format, placeholderText, ariaLabel, className },
   ref
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -233,8 +238,10 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
 
   const { t, locale } = useI18n();
   const translateRef = useRef(t);
+  const severityRef = useRef(severityOverrides);
   useEffect(() => {
     translateRef.current = t;
+    severityRef.current = severityOverrides;
   });
 
   /** Where every underlined alert is now. */
@@ -277,7 +284,7 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
     const diagnostic: Diagnostic = {
       from,
       to,
-      severity: getSeverity(alert.Severity),
+      severity: getSeverity(severityRef.current[alert.Check] ?? alert.Severity),
       source: alert.Check,
       message: cleanMessage,
       actions,
@@ -448,8 +455,9 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
     viewRef.current?.dispatch({ effects: languageCompartmentRef.current.reconfigure(languageFor(format)) });
   }, [format]);
 
-  // The language changed: reword the placeholder, the accessible name and the fixes in the tooltips.
-  // The diagnostics are rebuilt where they are now, so alerts keep their tracked positions.
+  // The language changed, or a rule got another severity: reword the placeholder, the accessible
+  // name and the fixes in the tooltips, and redraw the underlines. The diagnostics are rebuilt where
+  // they are now, so alerts keep their tracked positions.
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
@@ -468,7 +476,7 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
       if (alert) rebuilt.push(buildDiagnostic(alert, from, to));
     });
     if (rebuilt.length > 0) view.dispatch(setDiagnostics(view.state, rebuilt));
-  }, [locale, placeholderText, ariaLabel, buildDiagnostic]);
+  }, [locale, placeholderText, ariaLabel, severityOverrides, buildDiagnostic]);
 
   useImperativeHandle(ref, () => {
     const find = (id: number): { diagnostic: Diagnostic; from: number; to: number } | null => {

@@ -72,7 +72,7 @@ test.describe('the rule names', () => {
     expect(parseStoredIgnoredRules(many)).toHaveLength(MAX_IGNORED_RULES);
   });
 
-  test('the .vale.ini puts the ignored rules last, without repeating them', () => {
+  test('the .vale.ini writes the ignored rules after the ones it switches off itself, without repeating them', () => {
     const ini = buildValeIni({
       stylesPath: '/tmp/styles',
       style: 'Google',
@@ -293,7 +293,8 @@ test.describe('the ignored rules in the settings', () => {
     const second = (await checks(page))[0];
     await alertCard(page, second).first().getByRole('button', { name: `Ignore rule ${second}` }).click();
 
-    await ignoredList(page).getByRole('button', { name: 'Copy as .vale.ini lines' }).click();
+    // one button for the ignored rules and the severities
+    await page.getByRole('button', { name: 'Copy as .vale.ini lines' }).click();
     await expect(toasts(page)).toContainText('Copied');
     const copied = await page.evaluate(() => navigator.clipboard.readText());
     expect(copied).toBe(`Google.We = NO\n${second} = NO`);
@@ -320,7 +321,7 @@ test.describe('in Portuguese', () => {
     await expect(ignoredList(page)).toContainText('Regras ignoradas');
     await expect(page.getByTestId('ignored-summary')).toHaveText('1 regra ignorada');
     await expect(ignoredList(page).getByRole('button', { name: 'Parar de ignorar a regra Google.We' })).toBeVisible();
-    await expect(ignoredList(page).getByRole('button', { name: 'Copiar como linhas do .vale.ini' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Copiar como linhas do .vale.ini' })).toBeVisible();
   });
 });
 

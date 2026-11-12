@@ -1,6 +1,8 @@
 import { isDocumentFormat } from '@/lib/document-format';
 import type { DocumentFormat } from '@/lib/document-format';
 import { parseStoredIgnoredRules } from '@/lib/ignored-rules';
+import { parseStoredSeverities } from '@/lib/rule-severity';
+import type { SeverityOverrides } from '@/lib/rule-severity';
 import { parseStoredVocabulary } from '@/lib/vocabulary';
 import type { CustomRule } from '@/types/lint';
 import { EMPTY_VOCABULARY } from '@/types/vocabulary';
@@ -15,6 +17,7 @@ export const DRAFT_KEY = 'verbalize:draft:v1';
 export const PREFS_KEY = 'verbalize:prefs:v1';
 export const VOCABULARY_KEY = 'verbalize:vocabulary:v1';
 export const IGNORED_RULES_KEY = 'verbalize:ignored-rules:v1';
+export const SEVERITIES_KEY = 'verbalize:rule-severities:v1';
 
 // Same limits as the API (lib/lint-guards.ts), repeated here because that module is server-only
 const MAX_RULES = 10;
@@ -169,4 +172,17 @@ export function saveIgnoredRules(rules: readonly string[]): boolean {
 
 export function readIgnoredRules(raw: string | null): string[] | null {
   return parseStoredIgnoredRules(raw);
+}
+
+/** Saves the severities given to rules, or removes the entry when there are none. Returns false if the browser refused. */
+export function saveSeverities(severities: SeverityOverrides): boolean {
+  if (Object.keys(severities).length === 0) {
+    removeStorage(SEVERITIES_KEY);
+    return true;
+  }
+  return writeStorage(SEVERITIES_KEY, JSON.stringify(severities));
+}
+
+export function readSeverities(raw: string | null): SeverityOverrides | null {
+  return parseStoredSeverities(raw);
 }

@@ -30,6 +30,17 @@ export const ptBR: Record<keyof typeof en, string> = {
 
   'settings.vocabulary': 'Vocabulário',
   'settings.ignoredRules': 'Regras ignoradas',
+  'settings.ruleSeverities': 'Gravidade das regras',
+
+  'severity.change': 'Gravidade da regra {rule}',
+  'severity.field': 'Gravidade',
+  'severity.summary_one': '{count} regra com gravidade própria',
+  'severity.summary_other': '{count} regras com gravidade própria',
+  'severity.none':
+    'Nenhuma regra tem gravidade própria. Use o menu de gravidade em um alerta para tornar uma regra erro, aviso ou sugestão.',
+  'severity.help': 'Vale para todas as revisões. Uma regra que você também ignora continua desligada.',
+  'severity.full': 'Você já definiu a gravidade de {max} regras. Restaure uma para alterar outra.',
+  'severity.reset': 'Usar a gravidade padrão da regra {rule}',
 
   'ignore.button': 'Ignorar regra',
   'ignore.buttonLabel': 'Ignorar a regra {rule}',
@@ -192,4 +203,6 @@ export const ptBR: Record<keyof typeof en, string> = {
   'api.vocabulary_term_too_long': 'Um termo do vocabulário tem mais de {max} caracteres.',
   'api.ignored_rules_invalid': 'A lista de regras ignoradas não é válida.',
   'api.ignored_rules_too_many': 'Há regras ignoradas demais. O máximo é {max}.',
+  'api.severities_invalid': 'As gravidades das regras não são válidas.',
+  'api.severities_too_many': 'Há regras demais com gravidade própria. O máximo é {max}.',
 };

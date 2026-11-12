@@ -27,6 +27,8 @@ export const API_ERROR_CODES = [
   'vocabulary_term_too_long',
   'ignored_rules_invalid',
   'ignored_rules_too_many',
+  'severities_invalid',
+  'severities_too_many',
   'vale_failed',
   'parse_failed',
   'internal',

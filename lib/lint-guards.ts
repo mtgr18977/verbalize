@@ -7,6 +7,8 @@ import { EMPTY_VOCABULARY } from '@/types/vocabulary';
 import type { Vocabulary } from '@/types/vocabulary';
 import { MAX_VOCABULARY_TERMS, MAX_VOCABULARY_TERM_LENGTH, normalizeTerms } from '@/lib/vocabulary';
 import { MAX_IGNORED_RULES, MAX_RULE_NAME_LENGTH, isRuleName, uniqueRules } from '@/lib/ignored-rules';
+import { MAX_SEVERITY_OVERRIDES, isRuleSeverity } from '@/lib/rule-severity';
+import type { SeverityOverrides } from '@/lib/rule-severity';
 
 /**
  * Limits and request guards for POST /api/lint.
@@ -42,6 +44,7 @@ export const MAX_BODY_BYTES =
   2 * MAX_CUSTOM_RULES * MAX_RULE_LENGTH +
   2 * 2 * MAX_VOCABULARY_TERMS * MAX_VOCABULARY_TERM_LENGTH +
   2 * MAX_IGNORED_RULES * MAX_RULE_NAME_LENGTH +
+  2 * MAX_SEVERITY_OVERRIDES * (MAX_RULE_NAME_LENGTH + 16) +
   8 * 1024;
 
 export const ALLOWED_STYLES = ['Google', 'Microsoft', 'RedHat'] as const;
@@ -77,6 +80,8 @@ export interface LintRequest {
   vocabulary: Vocabulary;
   /** Rules switched off, as `Style.Rule`. Every name matches `isRuleName`. */
   ignoredRules: string[];
+  /** Severity given to rules. Every key matches `isRuleName` and every value is a severity. */
+  severities: SeverityOverrides;
 }
 
 interface RequestErrorOptions {
@@ -210,13 +215,34 @@ function parseIgnoredRules(value: unknown): string[] {
   return rules;
 }
 
+/**
+ * Both the names and the values are written into the .vale.ini. A value that is not exactly one of
+ * the three severities is refused, because Vale does not complain about it: it switches the rule off.
+ */
+function parseSeverities(value: unknown): SeverityOverrides {
+  if (value === undefined || value === null) return {};
+  if (!isRecord(value)) {
+    throw new RequestError('severities must be an object like {"Google.We": "error"}', 400, 'severities_invalid');
+  }
+  const entries = Object.entries(value);
+  if (entries.some(([rule, severity]) => !isRuleName(rule) || !isRuleSeverity(severity))) {
+    throw new RequestError('severities needs rule names like "Google.We" and the values error, warning or suggestion', 400, 'severities_invalid');
+  }
+  if (entries.length > MAX_SEVERITY_OVERRIDES) {
+    throw new RequestError(`More than ${MAX_SEVERITY_OVERRIDES} rules with their own severity`, 400, 'severities_too_many', {
+      params: { max: MAX_SEVERITY_OVERRIDES },
+    });
+  }
+  return Object.fromEntries(entries) as SeverityOverrides;
+}
+
 /** Validates the decoded JSON body. Every field is checked for type before it is used. */
 export function parseLintRequest(body: unknown): LintRequest {
   if (!isRecord(body)) {
     throw new RequestError('Request body must be a JSON object', 400, 'invalid_request');
   }
 
-  const { text, style, customRules, vocabulary, format, ignoredRules } = body;
+  const { text, style, customRules, vocabulary, format, ignoredRules, severities } = body;
 
   if (typeof text !== 'string' || text.length === 0) {
     throw new RequestError('No text provided or invalid format', 400, 'text_required');
@@ -272,6 +298,7 @@ export function parseLintRequest(body: unknown): LintRequest {
     customRules: rules,
     vocabulary: parseVocabulary(vocabulary),
     ignoredRules: parseIgnoredRules(ignoredRules),
+    severities: parseSeverities(severities),
   };
 }
 

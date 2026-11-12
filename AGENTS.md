@@ -55,6 +55,7 @@ verbalize/
 │   ├── document-format.ts        # Markdown / AsciiDoc: detection, extensions
 │   ├── ignored-rules.ts          # Rule names the user ignores: validation, ini lines, stored list
 │   ├── lint-guards.ts            # Limits and request guards for /api/lint
+│   ├── rule-severity.ts          # Severity given to rules: validation, ini lines, stored map
 │   ├── run-process.ts            # Runs a command with limits and kills its whole process group
 │   ├── vale-config.ts            # Builds the .vale.ini of one request
 │   ├── vocabulary.ts             # Escaping, validation, import and files of the project vocabulary
@@ -338,7 +339,7 @@ npx playwright show-report
 
 ### Autosave (drafts)
 
-- `hooks/use-draft-autosave.ts` keeps the text and the uploaded rules under `verbalize:draft:v1`, the project vocabulary under `verbalize:vocabulary:v1`, the ignored rules under `verbalize:ignored-rules:v1`, and the style guide and the autosave choice under `verbalize:prefs:v1`. The draft is restored on load with a notice ("Restored your draft from ..."); reviews are never stored, because they would describe text that may have changed.
+- `hooks/use-draft-autosave.ts` keeps the text and the uploaded rules under `verbalize:draft:v1`, the project vocabulary under `verbalize:vocabulary:v1`, the ignored rules under `verbalize:ignored-rules:v1`, the severities of rules under `verbalize:rule-severities:v1`, and the style guide and the autosave choice under `verbalize:prefs:v1`. The draft is restored on load with a notice ("Restored your draft from ..."); reviews are never stored, because they would describe text that may have changed.
 - Saving starts only after the stored draft has been read. Never save before restoring: the empty editor of a fresh load would overwrite the draft.
 - Writes are debounced (600 ms) and flushed on `pagehide` and when the page becomes hidden. Identical content is not rewritten, so a draft keeps its original time. Clearing the editor removes the stored draft.
 - Every storage call is wrapped: blocked or full storage shows "Not saved" and the editor keeps working; unreadable or malformed data is ignored (`parseDraft` validates shape and limits).
@@ -371,9 +372,19 @@ npx playwright show-report
 
 - "Ignore rule" (a button on every alert card and an action in the editor tooltip) switches a rule off for every later review. The list is `ignoredRules` in the request, a list of `Style.Rule` names, and reaches Vale as `Style.Rule = NO` lines at the end of the `[*.md]` or `[*.adoc]` section (`lib/vale-config.ts`). Settings has the list with "Stop ignoring" and "Copy as .vale.ini lines" (the same lines the server writes, so they work in a repository).
 - **Security.** The ini format is line based. Measured: a name written raw as `Google.We\n[*.md]\nBasedOnStyles = Microsoft` adds a section and changes which styles Vale applies. So `lib/ignored-rules.ts` accepts only `^[A-Za-z][A-Za-z0-9_-]*\.[A-Za-z0-9][A-Za-z0-9_-]*$` (80 characters at most, 200 names at most) and `parseLintRequest` **refuses** anything else (`ignored_rules_invalid`, `ignored_rules_too_many`) instead of cleaning it up. Stored names are checked again when read. The rule part may start with a digit (`Custom.1-rule`), and never has a second dot: Vale reports `terms.v2.yml` as `Custom.terms`.
-- Measured with Vale 3.9.5: a rule that does not exist, or one of a style that is not active, is accepted without error; names are case sensitive; **when a key appears twice the last line wins**, which is why the ignored rules come last (an ignored `Vale.Spelling` stays off even when the spelling switch turns it on); repeating a line is harmless, but the list is deduplicated anyway.
+- Measured with Vale 3.9.5: a rule that does not exist, or one of a style that is not active, is accepted without error; names are case sensitive; **when a key appears twice the FIRST line wins** (see "Rule severities": this was first written as "last" by mistake, from a mislabelled experiment); repeating a `NO` line is harmless, but the list is deduplicated anyway. The ignored rules are written right after the lines Verbalize adds to switch rules off, and before any severity.
 - Ignoring keeps the review current: taking a rule's alerts away is what the server would do, so the snapshot's `rulesKey` (which includes the ignored rules) is moved along, but only if the review was current before. Stopping to ignore a rule is the opposite: the review becomes out of date and the rule returns with the next review. A notice offers Undo, which also brings the underlines back (they are drawn only while the document still equals the reviewed text, and without alerts that were resolved for other reasons).
 - Stored like the vocabulary: it follows the autosave switch, and turning autosave off deletes it. "Start fresh" keeps it, because it is configuration.
+
+### Rule severities
+
+- A menu on every alert card ("Severity of Google.We": error, warning, suggestion) gives a rule another severity for every later review. It is `severities` in the request, a map `Style.Rule` to one of the three values, and reaches Vale as `Style.Rule = error` lines (`lib/vale-config.ts`). Settings lists them with a menu and a reset button; one "Copy as .vale.ini lines" button copies these and the ignored rules.
+- **Measured with Vale 3.9.5, and each point shapes the code (`lib/rule-severity.ts`):**
+  - Any other value (`Error`, `bogus`) does not fail: it silently **switches the rule off**. The server refuses anything but the exact three values (`severities_invalid`, `severities_too_many`), and so does the reading of stored values.
+  - A severity line **switches a rule on** when its style is not active: `Microsoft.We = error` under the Google style, `Vale.Spelling = error` without the built-in style. `buildValeIni` writes severities only for active styles, so a severity kept for another style guide, or for spelling that is off, does nothing.
+  - **When a key appears twice the first line wins**, for every pair of values (NO, YES, error, warning, suggestion). So the order of the file is: the rules Verbalize switches off itself, the ignored rules, then the severities. A severity can neither bring back a rule that is off nor beat an ignored one. Do not "tidy" this order: `tests/rule-severity.spec.ts` fails on the old order for the spelling, the ignored rule and the file itself.
+- The severity belongs to the rule, not to the text, so changing it applies at once to the alerts on screen, even if the text was edited since the review (`appliedSeverities`; the editor redraws the underlines where they are, through the `severityOverrides` prop, and the language switch keeps them). The review stays current if it was, as with ignoring a rule. Resetting is the opposite: the default severity is known only from a new review, so the review is out of date. A new review comes back with the severities applied by the server, so `appliedSeverities` starts empty again.
+- Stored under `verbalize:rule-severities:v1`, like the ignored rules: it follows the autosave switch, and "Start fresh" keeps it.
 
 ### AsciiDoc
 

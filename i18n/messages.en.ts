@@ -29,6 +29,17 @@ export const en = {
 
   'settings.vocabulary': 'Vocabulary',
   'settings.ignoredRules': 'Ignored rules',
+  'settings.ruleSeverities': 'Rule severities',
+
+  'severity.change': 'Severity of {rule}',
+  'severity.field': 'Severity',
+  'severity.summary_one': '{count} rule with its own severity',
+  'severity.summary_other': '{count} rules with their own severity',
+  'severity.none':
+    'No rule has its own severity. Use the severity menu on an alert to make a rule an error, a warning or a suggestion.',
+  'severity.help': 'Applies to every review. A rule you also ignore stays off.',
+  'severity.full': 'You already set the severity of {max} rules. Reset one to change another.',
+  'severity.reset': 'Use the default severity of {rule}',
 
   'ignore.button': 'Ignore rule',
   'ignore.buttonLabel': 'Ignore rule {rule}',
@@ -191,4 +202,6 @@ export const en = {
   'api.vocabulary_term_too_long': 'A vocabulary term is longer than {max} characters.',
   'api.ignored_rules_invalid': 'The list of ignored rules is not valid.',
   'api.ignored_rules_too_many': 'Too many ignored rules. The maximum is {max}.',
+  'api.severities_invalid': 'The severities of the rules are not valid.',
+  'api.severities_too_many': 'Too many rules with their own severity. The maximum is {max}.',
 } as const;
