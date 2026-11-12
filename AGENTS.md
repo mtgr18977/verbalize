@@ -34,8 +34,12 @@ verbalize/
 │   ├── layout.tsx                # Root layout component
 │   └── page.tsx                  # Main application interface
 ├── components/
+│   ├── draft-status.tsx          # "Saved" label and the restored-draft notice
 │   └── lint-editor.tsx           # CodeMirror 6 editor with Vale diagnostics
+├── hooks/
+│   └── use-draft-autosave.ts     # Saves and restores the draft in localStorage
 ├── lib/
+│   ├── draft-storage.ts          # Defensive localStorage helpers and draft parsing
 │   ├── lint-guards.ts            # Limits and request guards for /api/lint
 │   ├── vale-fixes.ts             # One-click fixes derived from Vale's `Action`
 │   └── safe-url.ts               # Only http(s) links reach an href
@@ -311,6 +315,16 @@ npx playwright show-report
 - Markdown support is built on `@lezer/markdown` directly. Do not add `@codemirror/lang-markdown`: it adds about 87 KB (gzip) of embedded HTML, CSS and JavaScript highlighting that a prose editor does not use.
 - Browser spellcheck is off, because its red squiggles would collide with the linter's underlines.
 - Tests: use `tests/helpers/editor.ts` (`editor`, `setText`, `docText`, `review`). The editor mounts after hydration, so wait for it before reading its styles.
+
+### Autosave (drafts)
+
+- `hooks/use-draft-autosave.ts` keeps the text and the uploaded rules under `verbalize:draft:v1`, and the style guide and the autosave choice under `verbalize:prefs:v1`. The draft is restored on load with a notice ("Restored your draft from ..."); reviews are never stored, because they would describe text that may have changed.
+- Saving starts only after the stored draft has been read. Never save before restoring: the empty editor of a fresh load would overwrite the draft.
+- Writes are debounced (600 ms) and flushed on `pagehide` and when the page becomes hidden. Identical content is not rewritten, so a draft keeps its original time. Clearing the editor removes the stored draft.
+- Every storage call is wrapped: blocked or full storage shows "Not saved" and the editor keeps working; unreadable or malformed data is ignored (`parseDraft` validates shape and limits).
+- The documents can be confidential and `localStorage` is plain text, so "Save my draft in this browser" in the settings turns autosave off and deletes the stored draft.
+- Known limitation: with two tabs open, the last tab to save wins; other tabs' writes are not merged.
+- Tests: `tests/autosave.spec.ts` seeds storage with `addInitScript` (guarded with `sessionStorage` so it runs once per context).
 
 ### Design Constraints
 

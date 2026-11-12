@@ -1,0 +1,166 @@
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+
+import type { CustomRule } from '@/types/lint';
+import {
+  DRAFT_KEY,
+  PREFS_KEY,
+  parseDraft,
+  parsePrefs,
+  readStorage,
+  removeStorage,
+  saveDraft,
+  savePrefs,
+} from '@/lib/draft-storage';
+
+/** Wait this long after the last edit before writing, so typing does not hit storage per key. */
+const SAVE_DELAY_MS = 600;
+
+export type DraftStatus =
+  | { kind: 'idle' }
+  | { kind: 'saved'; at: Date }
+  | { kind: 'error' }
+  | { kind: 'off' };
+
+export interface RestoredDraft {
+  text: string;
+  customRules: CustomRule[];
+  /** The style guide chosen last time, if any. */
+  style: string | null;
+}
+
+interface UseDraftAutosaveOptions {
+  text: string;
+  style: string;
+  customRules: CustomRule[];
+  /** Called once, while rendering, with what was found in storage. */
+  onRestore: (draft: RestoredDraft) => void;
+}
+
+export interface DraftAutosave {
+  enabled: boolean;
+  /** Turning it off also deletes the stored draft. */
+  setEnabled: (enabled: boolean) => void;
+  status: DraftStatus;
+  /** When the restored draft was saved. Null once the user changes the text or dismisses it. */
+  restoredAt: Date | null;
+  dismissRestored: () => void;
+  /** Deletes the stored draft. The caller clears the editor. */
+  discard: () => void;
+}
+
+function subscribeNoop(): () => void {
+  return () => {};
+}
+
+// Fires when another tab writes to storage. Only the first read matters: after the draft has been
+// restored, later changes made elsewhere are ignored on purpose (last tab to save wins).
+function subscribeStorage(onChange: () => void): () => void {
+  window.addEventListener('storage', onChange);
+  return () => window.removeEventListener('storage', onChange);
+}
+
+/**
+ * Keeps the editor content, the uploaded rules and the style guide in this browser's storage.
+ *
+ * Saving only starts after the stored draft has been read, otherwise the empty editor of a fresh
+ * page load would overwrite the draft it is about to restore.
+ */
+export function useDraftAutosave({ text, style, customRules, onRestore }: UseDraftAutosaveOptions): DraftAutosave {
+  // false on the server and during hydration, true afterwards
+  const hydrated = useSyncExternalStore(subscribeNoop, () => true, () => false);
+  const rawDraft = useSyncExternalStore(subscribeStorage, () => readStorage(DRAFT_KEY), () => null);
+  const rawPrefs = useSyncExternalStore(subscribeStorage, () => readStorage(PREFS_KEY), () => null);
+
+  const [restoreDone, setRestoreDone] = useState(false);
+  const [enabled, setEnabledState] = useState(true);
+  const [status, setStatus] = useState<DraftStatus>({ kind: 'idle' });
+  const [restored, setRestored] = useState<{ at: Date; text: string } | null>(null);
+
+  if (hydrated && !restoreDone) {
+    setRestoreDone(true);
+    const prefs = parsePrefs(rawPrefs);
+    setEnabledState(prefs.autosave);
+    if (!prefs.autosave) setStatus({ kind: 'off' });
+
+    const draft = prefs.autosave ? parseDraft(rawDraft) : null;
+    if (draft || prefs.style) {
+      onRestore({ text: draft?.text ?? '', customRules: draft?.customRules ?? [], style: prefs.style });
+    }
+    if (draft && (draft.text.length > 0 || draft.customRules.length > 0)) {
+      setRestored({ at: new Date(draft.savedAt), text: draft.text });
+    }
+  }
+
+  const active = hydrated && restoreDone && enabled;
+
+  // Debounced save
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setTimeout(() => {
+      const result = saveDraft(text, customRules);
+      setStatus(
+        result.outcome === 'saved'
+          ? { kind: 'saved', at: new Date(result.savedAt) }
+          : result.outcome === 'failed'
+            ? { kind: 'error' }
+            : { kind: 'idle' }
+      );
+    }, SAVE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [active, text, customRules]);
+
+  // Save right away when the page is hidden or closed: a timer may never get to run, and on
+  // phones the browser can discard a background tab without warning.
+  const latestRef = useRef({ text, customRules, active });
+  useEffect(() => {
+    latestRef.current = { text, customRules, active };
+  });
+  useEffect(() => {
+    const flush = (): void => {
+      const latest = latestRef.current;
+      if (latest.active) saveDraft(latest.text, latest.customRules);
+    };
+    const onVisibility = (): void => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, []);
+
+  // The style guide and the autosave choice are preferences, kept even when there is no draft
+  useEffect(() => {
+    if (hydrated && restoreDone) savePrefs({ autosave: enabled, style });
+  }, [hydrated, restoreDone, enabled, style]);
+
+  const setEnabled = useCallback((next: boolean): void => {
+    setEnabledState(next);
+    if (next) {
+      setStatus({ kind: 'idle' });
+    } else {
+      removeStorage(DRAFT_KEY);
+      setRestored(null);
+      setStatus({ kind: 'off' });
+    }
+  }, []);
+
+  const discard = useCallback((): void => {
+    removeStorage(DRAFT_KEY);
+    setRestored(null);
+    setStatus({ kind: 'idle' });
+  }, []);
+
+  const dismissRestored = useCallback((): void => setRestored(null), []);
+
+  return {
+    enabled,
+    setEnabled,
+    status,
+    restoredAt: restored && restored.text === text ? restored.at : null,
+    dismissRestored,
+    discard,
+  };
+}

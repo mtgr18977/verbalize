@@ -5,16 +5,13 @@ import ReactMarkdown from 'react-markdown';
 import { useTheme } from 'next-themes';
 import { Sun, Moon, Upload, Copy, Check, Trash2, Settings, PlayCircle, ExternalLink, FileText, FileSearch, LoaderCircle, TriangleAlert, X } from 'lucide-react';
 
+import { DraftStatusLabel, RestoredNotice } from '@/components/draft-status';
 import { LintEditor } from '@/components/lint-editor';
 import type { LintEditorHandle } from '@/components/lint-editor';
-import type { AlertPosition, ReviewAlert, ValeAlert } from '@/types/lint';
+import { useDraftAutosave } from '@/hooks/use-draft-autosave';
+import type { AlertPosition, CustomRule, ReviewAlert, ValeAlert } from '@/types/lint';
 import { getFixes } from '@/lib/vale-fixes';
 import { safeHttpUrl } from '@/lib/safe-url';
-
-interface CustomRule {
-  name: string;
-  content: string;
-}
 
 /** What was linted, so the UI can tell when the results no longer match the editor. */
 interface ReviewSnapshot {
@@ -173,6 +170,18 @@ export default function Home() {
   // `theme` is "system" until the user picks one; `resolvedTheme` is what is actually shown
   const { resolvedTheme, setTheme } = useTheme();
 
+  // Keeps the text, the uploaded rules and the style guide in this browser, and restores them on load
+  const draft = useDraftAutosave({
+    text,
+    style,
+    customRules,
+    onRestore: (restored) => {
+      setText(restored.text);
+      setCustomRules(restored.customRules);
+      if (restored.style && STYLE_OPTIONS.some((option) => option.value === restored.style)) setStyle(restored.style);
+    },
+  });
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
   const editorHandleRef = useRef<LintEditorHandle>(null);
@@ -279,6 +288,16 @@ export default function Home() {
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  // "Start fresh" on the restored-draft notice: forget the stored draft and empty the editor
+  const discardDraft = (): void => {
+    draft.discard();
+    setText('');
+    setCustomRules([]);
+    setResults([]);
+    setResolvedIds(new Set());
+    setSnapshot(null);
   };
 
   const clearEditor = () => {
@@ -538,6 +557,25 @@ export default function Home() {
               multiple
             />
           </div>
+
+          {/* Drafts */}
+          <div className="space-y-2">
+            <span className="block text-xs font-semibold text-ink-2">Drafts</span>
+            <label className="flex cursor-pointer items-start gap-3 text-sm text-ink">
+              <input
+                type="checkbox"
+                checked={draft.enabled}
+                onChange={(e) => draft.setEnabled(e.target.checked)}
+                className="mt-0.5 h-5 w-5 shrink-0 accent-accent lg:h-4 lg:w-4"
+              />
+              <span>
+                Save my draft in this browser
+                <span className="mt-0.5 block text-xs text-ink-2">
+                  The text and rules stay on this device and are never sent anywhere except to be reviewed. Turn this off on a shared computer: it also deletes the saved draft.
+                </span>
+              </span>
+            </label>
+          </div>
         </div>
       </aside>
 
@@ -608,6 +646,7 @@ export default function Home() {
                 </div>
                 <span className="lg:hidden"><ColumnLabel>{view === 'preview' ? 'Preview' : 'Editor'}</ColumnLabel></span>
                 <span className="ml-3 font-mono text-xs text-ink-2">{text.length} chars</span>
+                <span className="ml-3"><DraftStatusLabel status={draft.status} /></span>
               </div>
               {view !== 'preview' && (
                 <div className="flex gap-1">
@@ -620,6 +659,10 @@ export default function Home() {
                 </div>
               )}
             </div>
+
+            {draft.restoredAt && (
+              <RestoredNotice restoredAt={draft.restoredAt} onDismiss={draft.dismissRestored} onDiscard={discardDraft} />
+            )}
 
             <div id="panel-editor" role="tabpanel" aria-label="Editor" className={`${view === 'preview' ? 'hidden' : 'flex'} min-h-0 flex-1 flex-col`}>
               <LintEditor

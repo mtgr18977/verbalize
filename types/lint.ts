@@ -27,3 +27,9 @@ export interface AlertPosition {
   from: number;
   to: number;
 }
+
+/** A rule file uploaded by the user, sent to the API with each review. */
+export interface CustomRule {
+  name: string;
+  content: string;
+}
