@@ -1,150 +1,216 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 
-const execFileAsync = promisify(execFile);
+import {
+  LINT_TIMEOUT_MS,
+  MAX_BODY_BYTES,
+  MAX_VALE_OUTPUT_BYTES,
+  RequestError,
+  assertTrustedRequest,
+  enforceRateLimit,
+  parseJson,
+  parseLintRequest,
+  readLimitedBody,
+  withLintSlot,
+} from '@/lib/lint-guards';
+import type { CustomRule, LintRequest } from '@/lib/lint-guards';
+import type { ApiErrorBody } from '@/lib/api-errors';
+import { getFileExtension } from '@/lib/document-format';
+import { runProcess } from '@/lib/run-process';
+import { VOCABULARY_NAME, buildValeIni } from '@/lib/vale-config';
+import { buildVocabularyFiles, hasTerms } from '@/lib/vocabulary';
+import type { Vocabulary } from '@/types/vocabulary';
 
-// Whitelist of allowed styles to prevent configuration injection
-const ALLOWED_STYLES = ['Google', 'Microsoft', 'RedHat'];
-const MAX_TEXT_LENGTH = 1024 * 1024; // 1MB
-const MAX_CUSTOM_RULES = 10;
-const MAX_RULE_LENGTH = 10 * 1024; // 10KB
+type ValeOutput = Record<string, unknown[]>;
 
-export async function POST(req: NextRequest) {
+function safeRuleFileName(name: string, used: Set<string>): string | null {
+  const withExtension = name.endsWith('.yml') ? name : `${name}.yml`;
+  // basename + character allowlist prevent path traversal out of the Custom style folder
+  const base = path.basename(withExtension).replace(/[^a-zA-Z0-9._-]/g, '_');
+  if (!base || base === '.' || base === '..') return null;
+
+  let candidate = base;
+  for (let n = 2; used.has(candidate); n += 1) {
+    candidate = base.replace(/\.yml$/, `-${n}.yml`);
+  }
+  used.add(candidate);
+  return candidate;
+}
+
+/** Writes accept.txt and reject.txt where Vale looks for the `Project` vocabulary. */
+async function writeVocabulary(stylesDir: string, vocabulary: Vocabulary): Promise<void> {
+  if (!hasTerms(vocabulary)) return;
+  const folder = path.join(stylesDir, 'config', 'vocabularies', VOCABULARY_NAME);
+  await fs.mkdir(folder, { recursive: true });
+  const files = buildVocabularyFiles(vocabulary);
+  await fs.writeFile(path.join(folder, 'accept.txt'), files.accept);
+  await fs.writeFile(path.join(folder, 'reject.txt'), files.reject);
+}
+
+/** Prepares the styles folder of one request. Returns whether a "Custom" style was written. */
+async function writeStyles(tmpDir: string, customRules: CustomRule[], vocabulary: Vocabulary): Promise<boolean> {
+  const tempStylesDir = path.join(tmpDir, 'styles');
+  await fs.mkdir(tempStylesDir, { recursive: true });
+
+  // Symlink the built-in styles so Vale finds them next to the temporary Custom style
+  const stylesPath = path.join(process.cwd(), 'styles');
   try {
-    const body = await req.json();
-    const { text, style, customRules } = body;
-
-    if (!text || typeof text !== 'string') {
-      return NextResponse.json({ error: 'No text provided or invalid format' }, { status: 400 });
-    }
-
-    if (text.length > MAX_TEXT_LENGTH) {
-      return NextResponse.json({ error: `Text exceeds maximum allowed length of ${MAX_TEXT_LENGTH} characters` }, { status: 400 });
-    }
-
-    if (!ALLOWED_STYLES.includes(style)) {
-      return NextResponse.json({ error: 'Invalid style guide selected' }, { status: 400 });
-    }
-
-    if (customRules && Array.isArray(customRules)) {
-      if (customRules.length > MAX_CUSTOM_RULES) {
-        return NextResponse.json({ error: `Too many custom rules. Maximum is ${MAX_CUSTOM_RULES}` }, { status: 400 });
-      }
-
-      for (const rule of customRules) {
-        if (rule.content && typeof rule.content === 'string' && rule.content.length > MAX_RULE_LENGTH) {
-          return NextResponse.json({ error: `Rule "${rule.name}" exceeds maximum allowed length of ${MAX_RULE_LENGTH} characters` }, { status: 400 });
-        }
+    for (const styleFolder of await fs.readdir(stylesPath)) {
+      const fullPath = path.join(stylesPath, styleFolder);
+      // "config" is where vocabularies live: a repository folder of that name must not shadow it
+      if (styleFolder !== 'config' && (await fs.stat(fullPath)).isDirectory()) {
+        await fs.symlink(fullPath, path.join(tempStylesDir, styleFolder), process.platform === 'win32' ? 'junction' : 'dir');
       }
     }
+  } catch (err: unknown) {
+    console.warn('Failed to symlink existing styles:', err);
+  }
 
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vale-'));
-    const tmpFile = path.join(tmpDir, 'doc.md');
-    await fs.writeFile(tmpFile, text);
+  await writeVocabulary(tempStylesDir, vocabulary);
+  if (customRules.length === 0) return false;
 
-    // Create a temporary styles directory to house both built-in and custom styles
-    const tempStylesDir = path.join(tmpDir, 'styles');
-    await fs.mkdir(tempStylesDir, { recursive: true });
+  const customStyleDir = path.join(tempStylesDir, 'Custom');
+  await fs.mkdir(customStyleDir, { recursive: true });
+  await fs.writeFile(
+    path.join(customStyleDir, 'meta.json'),
+    JSON.stringify({ name: 'Custom', description: 'User-uploaded rules', feed: '' })
+  );
 
-    // Symlink existing styles into the temporary styles directory
-    const stylesPath = path.join(process.cwd(), 'styles');
+  const used = new Set<string>();
+  for (const rule of customRules) {
+    const fileName = safeRuleFileName(rule.name, used);
+    if (fileName) {
+      await fs.writeFile(path.join(customStyleDir, fileName), rule.content);
+    }
+  }
+  return true;
+}
+
+/**
+ * Vale reads AsciiDoc by running `asciidoctor`, which is Ruby and is not there on serverless
+ * platforms. scripts/bin/asciidoctor is a stand-in written for Node (see that file): it is put first
+ * in PATH so Vale finds it, whatever else the machine has. Measured on a realistic document, Vale
+ * gives the same alerts at the same positions with it as with the Ruby original.
+ */
+const ASCIIDOC_BIN_DIR = path.join(process.cwd(), 'scripts', 'bin');
+const ASCIIDOC_COMMAND = path.join(ASCIIDOC_BIN_DIR, 'asciidoctor');
+
+async function isAsciidocAvailable(): Promise<boolean> {
+  // The stand-in is a script with a shebang: there is no way to run it on Windows
+  if (process.platform === 'win32') return false;
+  try {
+    // Serverless deployments may not preserve the executable bit
+    await fs.chmod(ASCIIDOC_COMMAND, 0o755).catch(() => undefined);
+    await fs.access(ASCIIDOC_COMMAND, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runVale(tmpDir: string, request: LintRequest): Promise<unknown[]> {
+  if (request.format === 'asciidoc' && !(await isAsciidocAvailable())) {
+    throw new RequestError('AsciiDoc support is not available on this server', 503, 'asciidoc_unavailable');
+  }
+
+  const tmpFile = path.join(tmpDir, `doc.${getFileExtension(request.format)}`);
+  await fs.writeFile(tmpFile, request.text);
+
+  const hasCustomRules = await writeStyles(tmpDir, request.customRules, request.vocabulary);
+  const iniFile = path.join(tmpDir, '.vale.ini');
+  await fs.writeFile(
+    iniFile,
+    buildValeIni({
+      stylesPath: path.join(tmpDir, 'styles'),
+      style: request.style,
+      format: request.format,
+      hasCustomRules,
+      vocabulary: request.vocabulary,
+      ignoredRules: request.ignoredRules,
+      severities: request.severities,
+    })
+  );
+
+  const valePath = path.join(process.cwd(), process.platform === 'win32' ? 'vale.exe' : 'vale');
+
+  // Serverless deployments may not preserve the executable bit
+  try {
+    await fs.chmod(valePath, 0o755);
+  } catch (err: unknown) {
+    console.warn('Could not chmod vale binary:', err);
+  }
+
+  const result = await runProcess(valePath, [`--config=${iniFile}`, '--output=JSON', tmpFile], {
+    cwd: tmpDir,
+    // Vale does not need the server's environment (tokens, cloud credentials, ...). Its helpers do
+    // need node (the AsciiDoc stand-in is a Node script), so the folder of this node comes along.
+    env: {
+      PATH: [ASCIIDOC_BIN_DIR, path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter),
+      HOME: tmpDir,
+      NODE_ENV: process.env.NODE_ENV,
+    },
+    timeoutMs: LINT_TIMEOUT_MS,
+    maxOutputBytes: MAX_VALE_OUTPUT_BYTES,
+  });
+
+  if (result.outputTooLarge) {
+    throw new RequestError('This text produced too many alerts to return. Lint a shorter section.', 413, 'output_too_large');
+  }
+  if (result.timedOut) {
+    throw new RequestError(
+      `Linting took longer than ${Math.round(LINT_TIMEOUT_MS / 1000)} s and was stopped. Lint a shorter section.`,
+      504,
+      'timeout',
+      { params: { seconds: Math.round(LINT_TIMEOUT_MS / 1000) } }
+    );
+  }
+
+  // Vale exits with a non-zero code when it finds alerts, but still prints valid JSON
+  if (result.stdout.trim().length > 0) {
     try {
-      const existingStyles = await fs.readdir(stylesPath);
-      for (const styleFolder of existingStyles) {
-        const fullPath = path.join(stylesPath, styleFolder);
-        const stats = await fs.stat(fullPath);
-        if (stats.isDirectory()) {
-          // Using junction for Windows compatibility if needed, but on Linux 'dir' works fine.
-          // In serverless (Linux), symlink is standard.
-          await fs.symlink(fullPath, path.join(tempStylesDir, styleFolder), process.platform === 'win32' ? 'junction' : 'dir');
-        }
-      }
-    } catch (err) {
-      console.warn('Failed to symlink existing styles:', err);
+      const results = JSON.parse(result.stdout) as ValeOutput;
+      return results[tmpFile] ?? [];
+    } catch {
+      throw new RequestError('Failed to parse Vale output', 500, 'parse_failed');
     }
+  }
 
-    let basedOnStyles = style;
+  console.error('Vale execution failed:', result.spawnError?.message ?? result.stderr.slice(0, 500));
+  throw new RequestError('Vale execution failed', 500, 'vale_failed');
+}
 
-    if (customRules && Array.isArray(customRules) && customRules.length > 0) {
-      const customStyleDir = path.join(tempStylesDir, 'Custom');
-      await fs.mkdir(customStyleDir, { recursive: true });
+export async function POST(req: NextRequest): Promise<NextResponse> {
+  let tmpDir: string | undefined;
 
-      // Add a minimal meta.json for the Custom style to be recognized by Vale
-      await fs.writeFile(path.join(customStyleDir, 'meta.json'), JSON.stringify({
-        name: 'Custom',
-        description: 'User-uploaded rules',
-        feed: ''
-      }));
+  try {
+    assertTrustedRequest(req);
+    enforceRateLimit(req);
 
-      for (const rule of customRules) {
-        if (rule.name && rule.content) {
-          // Ensure rule name ends with .yml
-          const ruleName = rule.name.endsWith('.yml') ? rule.name : `${rule.name}.yml`;
-          // Normalize and sanitize the rule name to prevent path traversal
-          const baseName = path.basename(ruleName);
-          const safeRuleName = baseName.replace(/[^a-zA-Z0-9._-]/g, '_');
-          if (!safeRuleName || safeRuleName === '.' || safeRuleName === '..') {
-            continue;
-          }
-          await fs.writeFile(path.join(customStyleDir, safeRuleName), rule.content);
-        }
-      }
+    const request = parseLintRequest(parseJson(await readLimitedBody(req, MAX_BODY_BYTES)));
 
-      basedOnStyles = `${style}, Custom`;
+    const alerts = await withLintSlot(async () => {
+      tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vale-'));
+      return runVale(tmpDir, request);
+    });
+    return NextResponse.json(alerts);
+  } catch (error: unknown) {
+    if (error instanceof RequestError) {
+      const body: ApiErrorBody = { error: error.message, code: error.code, params: error.params };
+      return NextResponse.json(body, { status: error.status, headers: error.headers });
     }
-
-    const valeIni = `
-StylesPath = ${tempStylesDir}
-MinAlertLevel = suggestion
-[*.md]
-BasedOnStyles = ${basedOnStyles}
-`;
-    const iniFile = path.join(tmpDir, '.vale.ini');
-    await fs.writeFile(iniFile, valeIni);
-
-    const valePath = path.join(process.cwd(), process.platform === 'win32' ? 'vale.exe' : 'vale');
-
-    // Ensure the binary is executable. This is crucial for serverless environments
-    // where file permissions might not be preserved during deployment.
-    try {
-      await fs.chmod(valePath, 0o755);
-    } catch (err) {
-      console.warn('Could not chmod vale binary:', err);
-    }
-
-    try {
-      // Use --config to point to our temporary .vale.ini
-      const { stdout } = await execFileAsync(valePath, [`--config=${iniFile}`, '--output=JSON', tmpFile]);
-      const results = JSON.parse(stdout);
-      return NextResponse.json(results[tmpFile] || []);
-    } catch (error: unknown) {
-      // Vale returns non-zero exit code if it finds any alerts
-      const execError = error as { stdout?: string; message?: string };
-      if (execError.stdout) {
-        try {
-            const results = JSON.parse(execError.stdout);
-            return NextResponse.json(results[tmpFile] || []);
-        } catch {
-            return NextResponse.json({ error: 'Failed to parse Vale output' }, { status: 500 });
-        }
-      }
-      console.error('Vale execution failed:', execError.message || execError);
-      return NextResponse.json({ error: 'Vale execution failed' }, { status: 500 });
-    } finally {
-      // Clean up temporary files
+    console.error('Internal server error:', error);
+    const body: ApiErrorBody = { error: 'Internal server error', code: 'internal' };
+    return NextResponse.json(body, { status: 500 });
+  } finally {
+    // Covers every path after mkdtemp, including validation and write failures
+    if (tmpDir) {
       try {
         await fs.rm(tmpDir, { recursive: true, force: true });
-      } catch (rmError) {
+      } catch (rmError: unknown) {
         console.error('Failed to remove temp directory:', rmError);
       }
     }
-  } catch (error: unknown) {
-    const err = error as Error;
-    console.error('Internal server error:', err);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

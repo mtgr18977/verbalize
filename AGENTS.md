@@ -33,11 +33,43 @@ verbalize/
 │   │       └── route.ts          # Core API endpoint for Vale integration
 │   ├── layout.tsx                # Root layout component
 │   └── page.tsx                  # Main application interface
+├── components/
+│   ├── asciidoc-language.ts      # AsciiDoc highlighting for the editor (small stream parser)
+│   ├── asciidoc-preview.tsx      # AsciiDoc preview, built in the browser on demand
+│   ├── draft-status.tsx          # "Saved" label and the restored-draft notice
+│   ├── lint-editor.tsx           # CodeMirror 6 editor with Vale diagnostics
+│   └── vocabulary-dialog.tsx     # Editor of the project vocabulary (native <dialog>)
+├── hooks/
+│   └── use-draft-autosave.ts     # Saves and restores the draft in localStorage
+├── i18n/
+│   ├── locale.ts                 # Supported languages, Accept-Language negotiation, cookie name
+│   ├── messages.en.ts            # English interface text (source of truth for the keys)
+│   ├── messages.pt-br.ts         # Portuguese (Brazil) interface text
+│   ├── translate.ts              # createTranslator: {placeholders} and plural variants
+│   ├── provider.tsx              # I18nProvider and useI18n (client)
+│   └── api-error.ts              # Words API error codes in the interface language
+├── lib/
+│   ├── draft-storage.ts          # Defensive localStorage helpers and draft parsing
+│   ├── api-errors.ts             # Error codes of /api/lint, shared with the interface
+│   ├── asciidoc-html.ts          # Sanitizes the HTML of the AsciiDoc preview
+│   ├── document-format.ts        # Markdown / AsciiDoc: detection, extensions
+│   ├── ignored-rules.ts          # Rule names the user ignores: validation, ini lines, stored list
+│   ├── lint-guards.ts            # Limits and request guards for /api/lint
+│   ├── rule-severity.ts          # Severity given to rules: validation, ini lines, stored map
+│   ├── run-process.ts            # Runs a command with limits and kills its whole process group
+│   ├── vale-config.ts            # Builds the .vale.ini of one request
+│   ├── vocabulary.ts             # Escaping, validation, import and files of the project vocabulary
+│   ├── vale-fixes.ts             # One-click fixes derived from Vale's `Action`
+│   └── safe-url.ts               # Only http(s) links reach an href
+├── types/
+│   ├── lint.ts                   # Vale alert types shared by the UI and the editor
+│   └── vocabulary.ts             # The project vocabulary
 ├── styles/
 │   ├── Google/                   # Google Developer Documentation Style Guide
 │   ├── Microsoft/                # Microsoft Writing Style Guide
 │   └── RedHat/                   # Red Hat Documentation Style Guide
 ├── scripts/
+│   ├── bin/asciidoctor           # Node stand-in for the `asciidoctor` command Vale runs for AsciiDoc
 │   └── install-vale.js           # Vale binary installation script
 ├── tests/
 │   └── *.spec.ts                 # Playwright E2E test specifications
@@ -221,7 +253,10 @@ export function Editor({ initialValue = '', onLint, disabled = false }: EditorPr
 |----------|---------|---------|----------|
 | `VALE_CONFIG_PATH` | Path to .vale.ini | `./.vale.ini` | No |
 | `VALE_STYLES_PATH` | Path to styles directory | `./styles` | No |
-| `MAX_INPUT_SIZE` | Maximum text input size (bytes) | 1048576 (1MB) | No |
+| `MAX_INPUT_SIZE` | Maximum document size in bytes (UTF-8) | 204800 (200 KB) | No |
+| `LINT_TIMEOUT_MS` | Hard time limit for one Vale run; the process is killed and the API answers 504 | 8000 | No |
+| `MAX_CONCURRENT_LINTS` | Vale processes allowed at once per server instance; extra requests get 503 | 2 | No |
+| `RATE_LIMIT_MAX` | Requests per client per minute (in-memory, per instance); extra requests get 429 | 30 | No |
 | `NODE_ENV` | Environment mode | `development` | Yes |
 
 ---
@@ -281,9 +316,101 @@ npx playwright show-report
 3. **Accessibility First**: All interactive elements include proper ARIA labels and keyboard navigation.
 4. **Single-Page Workshop**: Input (text editor) and output (diagnostics) are the primary focal points.
 
+### Visual Theme ("Diagnóstico")
+
+- Colors are semantic tokens defined in `app/globals.css` (`paper`, `sheet`, `ink`, `ink-2`, `rule`, `accent`, `err`, `warn`, `select`) and flip with the `.dark` class. Use `bg-sheet text-ink border-rule`, not `bg-gray-*` and not `dark:` variants.
+- Every text/background pair must keep a contrast ratio of at least 4.5:1 (checked in `tests/theme.spec.ts`).
+- Severity is never color-only: errors use a wavy underline, warnings a dashed one and suggestions a dotted one.
+- Corners are 2-3 px, there are no shadows or gradients, labels are sentence case and at least 12 px (`text-xs`), and animations must respect `prefers-reduced-motion`.
+- Fonts are Atkinson Hyperlegible Next (interface) and Atkinson Hyperlegible Mono (editor), loaded in `app/layout.tsx` with variables on `<html>`.
+- Layout: below the `lg` breakpoint (1024 px) the app is a single column with a bottom tab bar (Editor, Preview, Alerts) and the settings are a drawer; from `lg` up the editor sits beside the alerts and Preview is a tab of the left pane. Use `h-dvh`, keep touch targets at 36 px or more on phones, and keep form fields at 16 px on phones so iOS does not zoom.
+- Alerts render as compiler-style diagnostics: severity, rule, position, the offending line and a `^^^` pointer. Tests find them with `data-testid="alert-card"`.
+
+### Editor (CodeMirror 6)
+
+- The editor is `components/lint-editor.tsx`. It is themed only with the CSS variables of the theme, so it follows light and dark mode without being reconfigured.
+- Alerts are CodeMirror diagnostics. `LintEditor` receives `alerts` (give it a new array only when there is a new review) and `reviewedText`; underlines are drawn only while the document still equals the reviewed text. After that the editor maps each alert through the user's edits and reports where it is now (`onPositionsChange`). An alert whose own text was edited is dropped, and the panel shows it as "text edited".
+- One-click fixes come from Vale's `Action` (`replace`, `remove`, `edit` with `trim_*` or `regex`); see `lib/vale-fixes.ts`. Fixes appear in the hover tooltip and in the alert card, and both go through the same code.
+- Ctrl/Cmd+Enter is removed from CodeMirror's keymap on purpose: the page uses it to run the review. F8 and Shift+F8 move between alerts.
+- Previews never load an image. `components/markdown-preview.tsx` replaces every `<img>` of the Markdown preview with its alt text (`preview.image`, `preview.imageWithAlt`, styled by `.preview-image`), as the AsciiDoc preview does. Measured: the preview is drawn behind the editor even while its tab is closed, so without this a document with `![](https://...)` made the browser request the image (6 requests in the test document) as soon as it was typed or restored from a draft, telling the author the reader's address and when the document was opened. Do not give `ReactMarkdown` an `img` back, and do not add `rehype-raw`. Links are closed the same way: a web link (`safeHttpUrl`) opens in a new tab with `rel="noopener noreferrer"` (the new page gets no `window.opener` and no `Referer`; the test has a control showing `window.open` without it does reach back), and every other link (relative path, `#anchor`, `mailto:`, `javascript:`, `data:`, `//host`) is plain text, because it could only take the reader away from the editor. `tests/markdown-preview.spec.ts` has a control that proves the request watcher can fail, and a role query cannot see the hidden preview: use `#panel-preview h1`.
+- Markdown support is built on `@lezer/markdown` directly. Do not add `@codemirror/lang-markdown`: it adds about 87 KB (gzip) of embedded HTML, CSS and JavaScript highlighting that a prose editor does not use.
+- Browser spellcheck is off, because its red squiggles would collide with the linter's underlines.
+- Tests: use `tests/helpers/editor.ts` (`editor`, `setText`, `docText`, `review`). The editor mounts after hydration, so wait for it before reading its styles.
+
+### Autosave (drafts)
+
+- `hooks/use-draft-autosave.ts` keeps the text and the uploaded rules under `verbalize:draft:v1`, the project vocabulary under `verbalize:vocabulary:v1`, the ignored rules under `verbalize:ignored-rules:v1`, the severities of rules under `verbalize:rule-severities:v1`, and the style guide and the autosave choice under `verbalize:prefs:v1`. The draft is restored on load with a notice ("Restored your draft from ..."); reviews are never stored, because they would describe text that may have changed.
+- Saving starts only after the stored draft has been read. Never save before restoring: the empty editor of a fresh load would overwrite the draft.
+- Writes are debounced (600 ms) and flushed on `pagehide` and when the page becomes hidden. Identical content is not rewritten, so a draft keeps its original time. Clearing the editor removes the stored draft.
+- Every storage call is wrapped: blocked or full storage shows "Not saved" and the editor keeps working; unreadable or malformed data is ignored (`parseDraft` validates shape and limits).
+- The documents can be confidential and `localStorage` is plain text, so "Save my draft in this browser" in the settings turns autosave off and deletes the stored draft.
+- Known limitation: with two tabs open, the last tab to save wins; other tabs' writes are not merged.
+- Tests: `tests/autosave.spec.ts` seeds storage with `addInitScript` (guarded with `sessionStorage` so it runs once per context).
+
+### Internationalization (English and Brazilian Portuguese)
+
+- Every visible string, `aria-label`, tooltip and alert dialog comes from `i18n/messages.en.ts` through `const { t } = useI18n()`. Never write interface text inline. To add a language: add it to `LOCALES` in `i18n/locale.ts` and create a catalog typed `Record<keyof typeof en, string>`; the compiler lists what is missing.
+- `{name}` in a message is replaced by a parameter. A message that depends on a number has `_one` and `_other` variants and is called with `count`: `t('alerts.noAlertsTitle', { count })`. `tests/i18n.spec.ts` checks that both catalogs have the same keys and the same `{placeholders}`, that none is empty, and that nothing was left in English.
+- The language is decided on the server in `app/layout.tsx`: the `verbalize-locale` cookie (an explicit choice) wins over `Accept-Language`, which wins over English. Reading request data makes every page dynamic on purpose, so the first paint is already in the right language. `<html lang>` follows. The cookie is functional (`SameSite=Lax`, one year) and is written by `I18nProvider.setLocale`, which also switches the language at once without reloading.
+- Language-dependent state inside CodeMirror lives in compartments (placeholder, accessible name) and the alert tooltips are rebuilt where the alerts are now, so switching the language does not lose their tracked positions.
+- API errors carry a machine-readable `code` and `params` (`lib/api-errors.ts`). The `error` text stays in English for API consumers; the interface words the error from the code (`describeApiError`). A new `RequestError` needs a code, and a new code needs an `api.<code>` message in both catalogs.
+- What is deliberately not translated: Vale's messages and rule names (the style guides check English text; the settings say so), the product name, and `public/example-style.yml`.
+- Dates and times use `formatTime` and `formatDateTime` from `useI18n`, not the browser default.
+- In tests find the editor with `editor(page)` from `tests/helpers/editor.ts`: its accessible name depends on the language. Playwright's default locale is `en-US`, so the existing tests run in English; use `test.use({ locale: 'pt-BR' })` for Portuguese.
+
+### Project vocabulary
+
+- The vocabulary is two lists of terms (accepted, rejected) and two switches (check spelling, ask for the capitalization of accepted terms). It reaches Vale as its own vocabulary files: `styles/config/vocabularies/Project/accept.txt` and `reject.txt`, written into the request's temporary folder, with `Vocab = Project` in the generated `.vale.ini` (`lib/vale-config.ts`). The exported files are exactly what Vale reads, so they also work in a repository.
+- Vale reads vocabulary entries as regular expressions and wraps each in `\b...\b`. Three rules follow from measuring Vale 3.9.5, and `lib/vocabulary.ts` implements them: terms are always written **escaped**, because a malformed expression makes Vale fail and some crash it (a bad `reject.txt` is a segfault); rejected terms get `(?i)`, because `reject` is otherwise case sensitive; and a term that starts or ends with a symbol (`C++`, `.NET`) can **never match**, so the dialog reports it instead of accepting it silently and `usableTerms` keeps it out of the request.
+- The built-in `Vale` style (Spelling, Terms, Avoid, Repetition) is switched on only when there are usable terms or spelling was asked for, so nobody gets alerts they did not ask for. `Vale.Repetition` is always off, and `Vale.Spelling` is off unless the switch is on: it flags every product name until the jargon is in the accepted terms.
+- `Vale.Terms` and `Vale.Avoid` carry no `Action`. The capitalization `Vale.Terms` asks for is read from its message (`getAlertFixes`), and its message prints the term as a pattern (`Node\.js`), so the interface unescapes it (`cleanVocabularyMessage`). Spelling alerts offer "Accept 'word'", which adds the word to the accepted terms and clears every alert for that word.
+- Limits (`MAX_VOCABULARY_TERMS` 500 per list, 80 characters per term) come from timing Vale: its cost follows the number of terms, not the size of the document (500 terms ~0.5 s, 1000 ~1.4 s, 3000 ~8.5 s). The API answers `vocabulary_invalid`, `vocabulary_too_many` and `vocabulary_term_too_long`.
+- Import reads Verbalize's own files back and skips lines with real regular expression syntax (reporting them), rather than turning them into literals that would never match what their author meant.
+- The vocabulary is stored under `verbalize:vocabulary:v1` and follows the autosave switch like the draft; "Start fresh" keeps it, because it is configuration. Changing it after a review marks the result out of date.
+
+### Ignored rules
+
+- "Ignore rule" (a button on every alert card and an action in the editor tooltip) switches a rule off for every later review. The list is `ignoredRules` in the request, a list of `Style.Rule` names, and reaches Vale as `Style.Rule = NO` lines at the end of the `[*.md]` or `[*.adoc]` section (`lib/vale-config.ts`). Settings has the list with "Stop ignoring" and "Copy as .vale.ini lines" (the same lines the server writes, so they work in a repository).
+- **Security.** The ini format is line based. Measured: a name written raw as `Google.We\n[*.md]\nBasedOnStyles = Microsoft` adds a section and changes which styles Vale applies. So `lib/ignored-rules.ts` accepts only `^[A-Za-z][A-Za-z0-9_-]*\.[A-Za-z0-9][A-Za-z0-9_-]*$` (80 characters at most, 200 names at most) and `parseLintRequest` **refuses** anything else (`ignored_rules_invalid`, `ignored_rules_too_many`) instead of cleaning it up. Stored names are checked again when read. The rule part may start with a digit (`Custom.1-rule`), and never has a second dot: Vale reports `terms.v2.yml` as `Custom.terms`.
+- Measured with Vale 3.9.5: a rule that does not exist, or one of a style that is not active, is accepted without error; names are case sensitive; **when a key appears twice the FIRST line wins** (see "Rule severities": this was first written as "last" by mistake, from a mislabelled experiment); repeating a `NO` line is harmless, but the list is deduplicated anyway. The ignored rules are written right after the lines Verbalize adds to switch rules off, and before any severity.
+- Ignoring keeps the review current: taking a rule's alerts away is what the server would do, so the snapshot's `rulesKey` (which includes the ignored rules) is moved along, but only if the review was current before. Stopping to ignore a rule is the opposite: the review becomes out of date and the rule returns with the next review. A notice offers Undo, which also brings the underlines back (they are drawn only while the document still equals the reviewed text, and without alerts that were resolved for other reasons).
+- Stored like the vocabulary: it follows the autosave switch, and turning autosave off deletes it. "Start fresh" keeps it, because it is configuration.
+
+### Rule severities
+
+- A menu on every alert card ("Severity of Google.We": error, warning, suggestion) gives a rule another severity for every later review. It is `severities` in the request, a map `Style.Rule` to one of the three values, and reaches Vale as `Style.Rule = error` lines (`lib/vale-config.ts`). Settings lists them with a menu and a reset button; one "Copy as .vale.ini lines" button copies these and the ignored rules.
+- **Measured with Vale 3.9.5, and each point shapes the code (`lib/rule-severity.ts`):**
+  - Any other value (`Error`, `bogus`) does not fail: it silently **switches the rule off**. The server refuses anything but the exact three values (`severities_invalid`, `severities_too_many`), and so does the reading of stored values.
+  - A severity line **switches a rule on** when its style is not active: `Microsoft.We = error` under the Google style, `Vale.Spelling = error` without the built-in style. `buildValeIni` writes severities only for active styles, so a severity kept for another style guide, or for spelling that is off, does nothing.
+  - **When a key appears twice the first line wins**, for every pair of values (NO, YES, error, warning, suggestion). So the order of the file is: the rules Verbalize switches off itself, the ignored rules, then the severities. A severity can neither bring back a rule that is off nor beat an ignored one. Do not "tidy" this order: `tests/rule-severity.spec.ts` fails on the old order for the spelling, the ignored rule and the file itself.
+- The severity belongs to the rule, not to the text, so changing it applies at once to the alerts on screen, even if the text was edited since the review (`appliedSeverities`; the editor redraws the underlines where they are, through the `severityOverrides` prop, and the language switch keeps them). The review stays current if it was, as with ignoring a rule. Resetting is the opposite: the default severity is known only from a new review, so the review is out of date. A new review comes back with the severities applied by the server, so `appliedSeverities` starts empty again.
+- Stored under `verbalize:rule-severities:v1`, like the ignored rules: it follows the autosave switch, and "Start fresh" keeps it.
+
+### AsciiDoc
+
+- A document is Markdown or AsciiDoc. The format is sent with every review (`format`, default `markdown`), decides the extension of the temporary file (`doc.md` or `doc.adoc`) and therefore the `[*.md]` or `[*.adoc]` section of the generated `.vale.ini` (`lib/vale-config.ts`), and is kept as a preference. Uploading a file picks the format from its extension (`detectFormat`); other extensions keep the current one. Changing it after a review makes the result out of date.
+- Vale reads AsciiDoc by running `asciidoctor -s -a notitle! -a attribute-missing=drop --safe-mode secure -`, with the document on stdin. That command is Ruby and does not exist on serverless platforms, so `scripts/bin/asciidoctor` is a Node stand-in on top of Asciidoctor.js, put first in the `PATH` of the Vale process. Measured with Vale 3.9.5 on a realistic document, Vale gives the same alerts at the same lines and columns with it as with the Ruby original (Google and Red Hat styles). It starts in about 0.1 s and converts 250 KB in about 0.4 s. Asciidoctor.js 4 is asynchronous: `convert` returns a promise.
+- **Security.** The stand-in converts in secure safe mode whatever its arguments say, and ignores every flag except attributes, `-s` and `-`. Without secure mode, `include::/some/file[]` would read the file from the server and the contents would come back in the alerts; `tests/asciidoc.spec.ts` proves that with a control experiment and proves the stand-in does not. Never let a user-controlled value reach its arguments.
+- `lib/run-process.ts` runs Vale in its own process group and kills the whole group when time or output runs out, because Vale starts `asciidoctor` and killing only Vale would leave that helper running. When testing that a process is gone, read its state in `/proc`: a killed process stays a zombie, and `kill(pid, 0)` still answers for it.
+- Deployment: the stand-in and `@asciidoctor/core` are used at run time but never imported, so `next.config.ts` (`outputFileTracingIncludes`) and `netlify.toml` (`included_files`) list them, together with `vale` and `styles`. Keep both lists in sync. AsciiDoc review is not available on Windows (the stand-in is a script with a shebang): the API answers `asciidoc_unavailable`.
+- Preview: `components/asciidoc-preview.tsx` loads Asciidoctor.js (~100 KB gzip) and DOMPurify (~11 KB) the first time an AsciiDoc preview is opened, not before, and converts in secure mode. The HTML is never trusted (AsciiDoc passthrough blocks let raw HTML through): `lib/asciidoc-html.ts` removes scripts, frames, forms, SVG, MathML, stylesheets and inline styles, replaces every image with its alt text (a remote image would reveal the reader's address to the author), treats links exactly like the Markdown preview (a web link opens in a new tab with `rel="noopener noreferrer"`, any other link such as a relative path, `mailto:`, `javascript:` or `data:` is unwrapped into plain text after sanitizing; the one difference is a link to an anchor of the same document, which stays, because AsciiDoc headings have ids), and prefixes every id with `adoc-` so a document cannot take the place of an id of the page.
+- The editor highlights AsciiDoc with a small line-oriented parser (titles, delimited blocks, attributes, lists, admonitions, inline marks). It is not a grammar: Asciidoctor reads the document and Vale reports from its output.
+
+### Notices (no browser dialogs)
+
+- Never use `alert()`, `confirm()` or `prompt()`; the `no-alert` ESLint rule enforces it. They block the whole page, ignore the theme and the fonts, look different in every browser, and on a phone they take over the screen. Use `useToast().notify` (`components/toast.tsx`) instead, and write the text as a catalog message.
+- A notice is `info` (leaves after 8 s) or `error` (stays until dismissed, so reading it is never a race). Hovering or focusing a notice stops its countdown. It never takes focus, it is announced (`aria-live` region, `role="alert"` for errors), and it may carry one action. A notice with the same `id` replaces the earlier one. On a phone the region sits above the tab bar.
+- In tests, look for errors inside `getByTestId('toasts')`: Next adds its own `role="alert"` route announcer, so a bare `getByRole('alert')` matches two elements.
+- A failed review is shown three ways on purpose: a notice (visible from any panel on a phone), the alerts panel and the header status, so the reason is still there when the notice is gone. Only `busy`, `rate_limited` and a lost connection offer "Try again": a time limit or a bad rule is not fixed by repeating.
+- "Clear editor" clears at once and offers Undo instead of asking "are you sure?" (a question is answered by habit; undo protects the text however it was cleared). Undo brings back the review too, and the offer disappears as soon as the user writes, so it can never overwrite new work.
+- `LintEditor` treats a replacement of the text from outside (upload, clear, undo) differently from typing: it clears the old alerts at once and does not count the replacement as an edit to the alerts that are put back right after. Mixing these up made Undo restore the cards but not the underlines.
+- Plural forms: zero takes the plural form in every language (`0 caracteres`), although CLDR counts 0 as "one" for Portuguese.
+
 ### Design Constraints
 
-- Text editor must support documents up to 1MB.
+- Documents up to 200 KB (`MAX_INPUT_SIZE`) are linted per request. Larger files must be linted in sections. Vale's run time grows faster than linearly with the number of alerts (measured: 25 KB of alert-dense text takes about 5 s, 100 KB about 66 s), so `LINT_TIMEOUT_MS` is what actually bounds CPU time.
+- Custom rules may only use data-only `extends` types (`existence`, `substitution`, `occurrence`, `repetition`, `consistency`, `conditional`, `capitalization`, `metric`, `spelling`, `sequence`). `script` rules are rejected because they can run forever. The allow-list lives in `lib/lint-guards.ts`.
+- `/api/lint` requires `Content-Type: application/json` and rejects cross-site callers (`Sec-Fetch-Site`, `Origin`).
 - Lint results must display within 2 seconds for typical documents (< 10,000 words).
 - Interface must be fully functional without JavaScript (progressive enhancement).
 
@@ -510,3 +637,13 @@ Before proposing architectural changes or submitting code, verify:
 **Maintained by:** Verbalize Development Team  
 **Feedback:** Submit issues via GitHub repository  
 **License:** Refer to repository LICENSE file
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+## This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

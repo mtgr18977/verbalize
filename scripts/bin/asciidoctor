@@ -1,0 +1,49 @@
+#!/usr/bin/env node
+'use strict';
+
+/**
+ * A minimal `asciidoctor` command for Vale, built on Asciidoctor.js.
+ *
+ * Vale reads AsciiDoc by running `asciidoctor` and parsing the HTML it prints. The Ruby original is
+ * not available where this app runs (serverless functions only have Node), so this stand-in gives
+ * Vale the same thing: AsciiDoc on stdin, HTML on stdout.
+ *
+ * Whatever the arguments say, the document is converted in SECURE safe mode: no `include::` of
+ * local files or URLs, and nothing that touches the file system or the network. The text comes from
+ * a user, so that is not negotiable. Only attributes (`-a name[=value]`), `-s` / `--no-header-footer`
+ * and `-` (stdin) are honored; everything else is ignored.
+ */
+
+const asciidoctor = require('@asciidoctor/core');
+
+const attributes = [];
+let embedded = false;
+
+const args = process.argv.slice(2);
+for (let i = 0; i < args.length; i += 1) {
+  const arg = args[i];
+  if (arg === '-s' || arg === '--no-header-footer' || arg === '--embedded') {
+    embedded = true;
+  } else if (arg === '-a' || arg === '--attribute') {
+    i += 1;
+    if (args[i] !== undefined) attributes.push(args[i]);
+  } else if (arg.startsWith('-a') && arg.length > 2) {
+    attributes.push(arg.slice(2));
+  } else if (arg.startsWith('--attribute=')) {
+    attributes.push(arg.slice('--attribute='.length));
+  } else if (arg === '--safe-mode' || arg === '-S' || arg === '-o' || arg === '--out-file') {
+    i += 1; // the value is ignored: the mode is always secure and the output is always stdout
+  }
+}
+
+const chunks = [];
+process.stdin.on('data', (chunk) => chunks.push(chunk));
+process.stdin.on('end', async () => {
+  // convert() is asynchronous in Asciidoctor.js 4
+  const html = await asciidoctor.convert(Buffer.concat(chunks).toString('utf8'), {
+    safe: 'secure',
+    standalone: !embedded,
+    attributes,
+  });
+  process.stdout.write(typeof html === 'string' ? html : String(html));
+});

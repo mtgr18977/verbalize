@@ -1,35 +1,223 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
-@theme {
-  --dark-mode: selector;
-}
+/*
+ * Tailwind v4 ignores `--dark-mode: selector`; without this variant every `dark:` utility
+ * follows the OS color scheme instead of the `.dark` class set by next-themes.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
 
+/*
+ * "Diagnóstico" theme.
+ * Every color is a token that flips with `.dark`, so components use `bg-sheet text-ink`
+ * and need no `dark:` variants. Contrast of each text/background pair is at least 4.5:1.
+ *
+ *   paper   app background          sheet   editor and panel surface
+ *   ink     main text               ink-2   secondary text, line numbers, suggestions
+ *   rule    hairlines               accent  actions, focus, links (one accent only)
+ *   err     error                   warn    warning
+ *   select  selected text
+ *
+ * Severity never relies on color alone: errors are underlined with a wavy line,
+ * warnings with a dashed line and suggestions with a dotted line.
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --paper: #EDF1EE;
+  --sheet: #FAFBFA;
+  --ink: #14201B;
+  --ink-2: #4A5851;
+  --rule: #C6D0CA;
+  --accent: #0B5E6E;
+  --on-accent: #FAFBFA;
+  --err: #B3261E;
+  --warn: #8A5600;
+  --select: #CBE6EA;
+  color-scheme: light;
 }
 
 .dark {
-  --background: #0a0a0a;
-  --foreground: #ededed;
+  --paper: #0F1613;
+  --sheet: #151D19;
+  --ink: #DDE7E1;
+  --ink-2: #9DACA4;
+  --rule: #2C3A33;
+  --accent: #5BC0CF;
+  --on-accent: #0F1613;
+  --err: #FF8F80;
+  --warn: #E8B955;
+  --select: #1F4650;
+  color-scheme: dark;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-paper: var(--paper);
+  --color-sheet: var(--sheet);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-rule: var(--rule);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-err: var(--err);
+  --color-warn: var(--warn);
+  --color-select: var(--select);
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-editor);
+  /* Square corners: nothing in the interface is rounder than 2-3 px */
+  --radius-xs: 2px;
+  --radius-sm: 2px;
+  --radius-md: 2px;
+  --radius-lg: 3px;
+  --radius-xl: 3px;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  transition: background-color 0.3s ease, color 0.3s ease;
+  background: var(--paper);
+  color: var(--ink);
 }
 
 @layer base {
   * {
-    @apply border-gray-200 dark:border-gray-800;
+    border-color: var(--rule);
   }
+
+  /* One visible focus style for every control */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+::selection {
+  background: var(--select);
+  color: var(--ink);
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--rule);
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-2);
+}
+
+/* Markdown preview: typography plugin variables mapped to the theme tokens */
+.prose-diagnostic {
+  --tw-prose-body: var(--ink);
+  --tw-prose-headings: var(--ink);
+  --tw-prose-lead: var(--ink-2);
+  --tw-prose-links: var(--accent);
+  --tw-prose-bold: var(--ink);
+  --tw-prose-counters: var(--ink-2);
+  --tw-prose-bullets: var(--ink-2);
+  --tw-prose-hr: var(--rule);
+  --tw-prose-quotes: var(--ink);
+  --tw-prose-quote-borders: var(--rule);
+  --tw-prose-captions: var(--ink-2);
+  --tw-prose-code: var(--ink);
+  --tw-prose-pre-code: var(--ink);
+  --tw-prose-pre-bg: var(--paper);
+  --tw-prose-th-borders: var(--rule);
+  --tw-prose-td-borders: var(--rule);
+}
+.prose-diagnostic :where(code):not(:where(pre *)) {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  padding: 0.1em 0.3em;
+  font-weight: 400;
+  font-family: var(--font-editor), ui-monospace, monospace;
+}
+.prose-diagnostic :where(code):not(:where(pre *))::before,
+.prose-diagnostic :where(code):not(:where(pre *))::after {
+  content: none;
+}
+.prose-diagnostic :where(pre) {
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+}
+.prose-diagnostic :where(a) {
+  text-underline-offset: 3px;
+}
+
+/*
+ * AsciiDoc preview. Asciidoctor emits plain structural HTML (no stylesheet is loaded), so the few
+ * constructs the typography plugin does not know are styled here with the theme tokens.
+ */
+.asciidoc-preview .title {
+  margin: 1.25rem 0 0.25rem;
+  font-weight: 700;
+}
+.asciidoc-preview .admonitionblock > table {
+  width: 100%;
+  margin: 1.25rem 0;
+  border-collapse: collapse;
+  border-left: 3px solid var(--accent);
+  background: var(--paper);
+}
+.asciidoc-preview .admonitionblock td {
+  padding: 0.625rem 1rem;
+  vertical-align: top;
+  border: 0;
+}
+.asciidoc-preview .admonitionblock td.icon {
+  width: 1%;
+  white-space: nowrap;
+}
+.asciidoc-preview .admonitionblock td.icon .title {
+  margin: 0;
+  color: var(--accent);
+}
+.asciidoc-preview .admonitionblock.warning > table,
+.asciidoc-preview .admonitionblock.caution > table,
+.asciidoc-preview .admonitionblock.important > table {
+  border-left-color: var(--warn);
+}
+.asciidoc-preview .admonitionblock.warning td.icon .title,
+.asciidoc-preview .admonitionblock.caution td.icon .title,
+.asciidoc-preview .admonitionblock.important td.icon .title {
+  color: var(--warn);
+}
+.asciidoc-preview .exampleblock > .content,
+.asciidoc-preview .sidebarblock > .content {
+  margin: 1.25rem 0;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--rule);
+}
+.asciidoc-preview .toc {
+  margin: 1rem 0;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+}
+.asciidoc-preview .toc ul {
+  margin: 0.25rem 0;
+}
+.asciidoc-preview table.tableblock {
+  width: 100%;
+}
+.asciidoc-preview table.tableblock th,
+.asciidoc-preview table.tableblock td {
+  padding: 0.375rem 0.75rem;
+  border: 1px solid var(--rule);
+  text-align: left;
+}
+.asciidoc-preview kbd {
+  padding: 0 0.3em;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  background: var(--paper);
+  font-family: var(--font-editor), ui-monospace, monospace;
+  font-size: 0.875em;
+}
+/* An image is never loaded in either preview: it is shown as its alt text */
+.preview-image {
+  color: var(--ink-2);
+  font-family: var(--font-editor), ui-monospace, monospace;
+  font-size: 0.875em;
 }

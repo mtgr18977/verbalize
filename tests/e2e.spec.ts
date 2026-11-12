@@ -1,5 +1,6 @@
 
 import { test, expect } from '@playwright/test';
+import { setText } from './helpers/editor';
 
 interface ValeAlert {
   Action: {
@@ -22,7 +23,7 @@ test.describe('Writer Assistant', () => {
   });
 
   test('should have the correct title', async ({ page }) => {
-    await expect(page).toHaveTitle(/Writer Assistant/);
+    await expect(page).toHaveTitle(/Verbalize/);
   });
 
   test('should toggle dark mode correctly', async ({ page }) => {
@@ -42,15 +43,14 @@ test.describe('Writer Assistant', () => {
   });
 
   test('should perform basic linting', async ({ page }) => {
-    const editor = page.locator('textarea');
-    await editor.fill('We use this in order to test the linting.');
+    await setText(page, 'We use this in order to test the linting.');
 
-    // Match the button by text as it's rendered with uppercase CSS but the source text is "Run Linting"
-    const lintButton = page.getByText('Run Linting');
+    // Match by role: the panel hint also mentions "Run Linting", so a text match is ambiguous
+    const lintButton = page.getByRole('button', { name: /Run Linting/ });
     await lintButton.click();
 
     // Wait for the results column to show alerts
-    const alertCards = page.locator('.p-4.rounded-xl.border');
+    const alertCards = page.getByTestId('alert-card');
     await expect(alertCards.first()).toBeVisible({ timeout: 15000 });
 
     const count = await alertCards.count();

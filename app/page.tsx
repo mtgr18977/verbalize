@@ -1,54 +1,267 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
-import ReactMarkdown from 'react-markdown';
+import { useState, useRef, useEffect, useCallback, useMemo, useSyncExternalStore } from 'react';
 import { useTheme } from 'next-themes';
-import { Sun, Moon, Upload, Copy, Check, Trash2, Sidebar, PlayCircle, ExternalLink, FileText, X } from 'lucide-react';
+import { Sun, Moon, Upload, Copy, Check, Trash2, Settings, PlayCircle, ExternalLink, FileText, FileSearch, LoaderCircle, TriangleAlert, X } from 'lucide-react';
 
-interface ValeAlert {
-  Action: {
-    Name: string;
-    Params: string[] | null;
-  };
-  Span: [number, number];
-  Check: string;
-  Description: string;
-  Link: string;
-  Message: string;
-  Severity: string;
-  Match: string;
-  Line: number;
+import { DraftStatusLabel, RestoredNotice } from '@/components/draft-status';
+import { AsciidocPreview } from '@/components/asciidoc-preview';
+import { LintEditor } from '@/components/lint-editor';
+import { MarkdownPreview } from '@/components/markdown-preview';
+import { useToast } from '@/components/toast';
+import { VocabularyDialog } from '@/components/vocabulary-dialog';
+import type { LintEditorHandle } from '@/components/lint-editor';
+import { useDraftAutosave } from '@/hooks/use-draft-autosave';
+import { describeApiError } from '@/i18n/api-error';
+import { LOCALES, LOCALE_NAMES, isLocale } from '@/i18n/locale';
+import { useI18n } from '@/i18n/provider';
+import type { Translate } from '@/i18n/translate';
+import type { AlertPosition, CustomRule, ReviewAlert, ValeAlert } from '@/types/lint';
+import { EMPTY_VOCABULARY } from '@/types/vocabulary';
+import type { Vocabulary } from '@/types/vocabulary';
+import { DEFAULT_FORMAT, DOCUMENT_ACCEPT, detectFormat } from '@/lib/document-format';
+import type { DocumentFormat } from '@/lib/document-format';
+import { describeFix, getAlertFixes } from '@/lib/vale-fixes';
+import { MAX_IGNORED_RULES, buildIgnoreLines, isRuleName } from '@/lib/ignored-rules';
+import { MAX_SEVERITY_OVERRIDES, RULE_SEVERITIES, buildSeverityLines, isRuleSeverity } from '@/lib/rule-severity';
+import type { RuleSeverity, SeverityOverrides } from '@/lib/rule-severity';
+import { MAX_VOCABULARY_TERMS, cleanVocabularyMessage, usableTerms } from '@/lib/vocabulary';
+import { safeHttpUrl } from '@/lib/safe-url';
+
+/** What was linted, so the UI can tell when the results no longer match the editor. */
+interface ReviewSnapshot {
+  text: string;
+  style: string;
+  rulesKey: string;
+  at: Date;
 }
 
-interface CustomRule {
-  name: string;
-  content: string;
+interface PanelMessageProps {
+  icon: React.ReactNode;
+  title: string;
+  detail: string;
+  /** A button under the text, such as "Try again". */
+  action?: React.ReactNode;
+}
+
+interface SeverityTone {
+  /** Text color of the label and of the ^^^ pointer */
+  text: string;
+  /** Underline shape: severity is readable without color */
+  decoration: string;
+}
+
+type ViewMode = 'editor' | 'preview' | 'alerts';
+
+interface TabButtonProps {
+  mode: ViewMode;
+  scope: 'desktop' | 'mobile';
+  selected: boolean;
+  onSelect: (mode: ViewMode) => void;
+  className: string;
+  children: React.ReactNode;
+}
+
+interface Snippet {
+  gutter: string;
+  code: string;
+  pointer: string;
+}
+
+/** Format names are the names of the languages, so they are not translated. */
+const FORMAT_OPTIONS: ReadonlyArray<{ value: DocumentFormat; label: string }> = [
+  { value: 'markdown', label: 'Markdown' },
+  { value: 'asciidoc', label: 'AsciiDoc' },
+];
+
+const STYLE_OPTIONS = [
+  { value: 'Google', label: 'Google Developer' },
+  { value: 'Microsoft', label: 'Microsoft Writing' },
+  { value: 'RedHat', label: 'Red Hat Style' },
+] as const;
+
+// Matches Tailwind's `lg` breakpoint: below it the layout is a single column with tabs
+const DESKTOP_QUERY = '(min-width: 1024px)';
+const TAB_ORDER_DESKTOP: ViewMode[] = ['editor', 'preview'];
+const TAB_ORDER_MOBILE: ViewMode[] = ['editor', 'preview', 'alerts'];
+
+const SNIPPET_CHARS_BEFORE = 30;
+const SNIPPET_CHARS_AFTER = 40;
+
+function subscribeNoop(): () => void {
+  return () => {};
+}
+
+function subscribeDesktop(onChange: () => void): () => void {
+  const query = window.matchMedia(DESKTOP_QUERY);
+  query.addEventListener('change', onChange);
+  return () => query.removeEventListener('change', onChange);
+}
+
+function getDesktopSnapshot(): boolean {
+  return window.matchMedia(DESKTOP_QUERY).matches;
+}
+
+// The server cannot know the screen size: assume desktop. Visibility is driven by CSS,
+// this value only decides which collapsed controls are made inert.
+function getDesktopServerSnapshot(): boolean {
+  return true;
+}
+
+/** Everything besides the text that changes what a review finds: the rules, the vocabulary, the ignored rules and the severities. */
+function getRulesKey(
+  rules: CustomRule[],
+  vocabulary: Vocabulary,
+  format: DocumentFormat,
+  ignoredRules: readonly string[],
+  severities: SeverityOverrides
+): string {
+  const rulesKey = rules.map((rule) => `${rule.name}\u0000${rule.content}`).join('\u0001');
+  const vocabularyKey = JSON.stringify([usableTerms(vocabulary.accept), usableTerms(vocabulary.reject), vocabulary.spelling, vocabulary.enforceCase]);
+  const severitiesKey = buildSeverityLines(severities).sort().join(',');
+  return `${rulesKey}\u0002${vocabularyKey}\u0002${format}\u0002${[...ignoredRules].sort().join(',')}\u0002${severitiesKey}`;
+}
+
+function getSeverityTone(severity: string): SeverityTone {
+  if (severity === 'error') return { text: 'text-err', decoration: 'decoration-wavy' };
+  if (severity === 'warning') return { text: 'text-warn', decoration: 'decoration-dashed' };
+  return { text: 'text-ink-2', decoration: 'decoration-dotted' };
+}
+
+/** Vale reports severities in English; the interface shows them in its own language. */
+function getSeverityLabel(severity: string, t: Translate): string {
+  if (severity === 'error') return t('severity.error');
+  if (severity === 'warning') return t('severity.warning');
+  if (severity === 'suggestion') return t('severity.suggestion');
+  return severity;
+}
+
+/** Builds the compiler-style excerpt: the offending line with a ^^^ pointer under the match. */
+function buildSnippet(line: string, span: [number, number], lineNumber: number): Snippet {
+  const flat = line.replace(/\t/g, ' ');
+  // Vale spans are 1-based and inclusive
+  const startIndex = Math.max(0, span[0] - 1);
+  const endIndex = Math.min(flat.length, Math.max(startIndex + 1, span[1]));
+  const from = Math.max(0, startIndex - SNIPPET_CHARS_BEFORE);
+  const to = Math.min(flat.length, endIndex + SNIPPET_CHARS_AFTER);
+  const prefix = from > 0 ? '…' : '';
+  const suffix = to < flat.length ? '…' : '';
+
+  return {
+    gutter: String(lineNumber),
+    code: `${prefix}${flat.slice(from, to)}${suffix}`,
+    pointer: `${' '.repeat(prefix.length + startIndex - from)}${'^'.repeat(Math.max(1, endIndex - startIndex))}`,
+  };
+}
+
+function PanelMessage({ icon, title, detail, action }: PanelMessageProps): React.JSX.Element {
+  return (
+    <div role="status" className="p-6">
+      <p className="flex items-center gap-2 text-sm font-semibold text-ink">
+        {icon}
+        {title}
+      </p>
+      <p className="mt-2 text-sm text-ink-2 max-w-[34ch]">{detail}</p>
+      {action && <div className="mt-3">{action}</div>}
+    </div>
+  );
+}
+
+function TabButton({ mode, scope, selected, onSelect, className, children }: TabButtonProps): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      role="tab"
+      id={`${scope}-tab-${mode}`}
+      data-tab={mode}
+      aria-selected={selected}
+      aria-controls={`panel-${mode}`}
+      tabIndex={selected ? 0 : -1}
+      onClick={() => onSelect(mode)}
+      className={className}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Label for the small column headers: sentence case, at least 12 px */
+function ColumnLabel({ children }: { children: React.ReactNode }): React.JSX.Element {
+  return <span className="text-xs font-semibold text-ink-2">{children}</span>;
 }
 
 export default function Home() {
   const [text, setText] = useState('');
   const [style, setStyle] = useState('Google');
+  const [format, setFormat] = useState<DocumentFormat>(DEFAULT_FORMAT);
   const [customRules, setCustomRules] = useState<CustomRule[]>([]);
-  const [results, setResults] = useState<ValeAlert[]>([]);
+  const [vocabulary, setVocabulary] = useState<Vocabulary>(EMPTY_VOCABULARY);
+  const [vocabularyOpen, setVocabularyOpen] = useState(false);
+  // Rules the user switched off (`Style.Rule`): sent with every review and kept in this browser
+  const [ignoredRules, setIgnoredRules] = useState<string[]>([]);
+  // The severity the user gave to rules (`Style.Rule`): sent with every review and kept in this browser
+  const [severities, setSeverities] = useState<SeverityOverrides>({});
+  // The part of it already shown on the current alerts. A review comes back with it applied, so this
+  // starts empty with every review; changing a severity applies it to the alerts on screen at once.
+  const [appliedSeverities, setAppliedSeverities] = useState<SeverityOverrides>({});
+  const [results, setResults] = useState<ReviewAlert[]>([]);
+  // Alerts fixed with one click: hidden from the list until the next review
+  const [resolvedIds, setResolvedIds] = useState<ReadonlySet<number>>(() => new Set());
+  // Where each alert is in the document now. The editor keeps these up to date while the user types.
+  const [positions, setPositions] = useState<Map<number, AlertPosition>>(() => new Map());
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [mounted, setMounted] = useState(false);
-  const { theme, setTheme } = useTheme();
+  // null = the user has not chosen yet: open on desktop, closed (a drawer) on mobile
+  const [sidebarOpen, setSidebarOpen] = useState<boolean | null>(null);
+  const [view, setView] = useState<ViewMode>('editor');
+  const isDesktop = useSyncExternalStore(subscribeDesktop, getDesktopSnapshot, getDesktopServerSnapshot);
+  const sidebarVisible = sidebarOpen ?? isDesktop;
+  // false on the server and during hydration, true afterwards: avoids a theme-icon mismatch
+  const mounted = useSyncExternalStore(subscribeNoop, () => true, () => false);
+  const [snapshot, setSnapshot] = useState<ReviewSnapshot | null>(null);
+  // Why the last review failed. Kept in the alerts panel after the notice is gone.
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const { t, locale, setLocale, formatTime } = useI18n();
+  const toast = useToast();
+  // `theme` is "system" until the user picks one; `resolvedTheme` is what is actually shown
+  const { resolvedTheme, setTheme } = useTheme();
+
+  // Keeps the text, the uploaded rules and the style guide in this browser, and restores them on load
+  const draft = useDraftAutosave({
+    text,
+    style,
+    format,
+    customRules,
+    vocabulary,
+    ignoredRules,
+    severities,
+    onRestore: (restored) => {
+      setText(restored.text);
+      setCustomRules(restored.customRules);
+      if (restored.vocabulary) setVocabulary(restored.vocabulary);
+      if (restored.ignoredRules) setIgnoredRules(restored.ignoredRules);
+      if (restored.severities) setSeverities(restored.severities);
+      if (restored.format) setFormat(restored.format);
+      if (restored.style && STYLE_OPTIONS.some((option) => option.value === restored.style)) setStyle(restored.style);
+    },
+  });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
-  const editorRef = useRef<HTMLTextAreaElement>(null);
-  const previewRef = useRef<HTMLDivElement>(null);
+  const editorHandleRef = useRef<LintEditorHandle>(null);
+  const pendingRevealRef = useRef<number | null>(null);
+  // "Try again" in a notice runs the latest version of the review, not the one it was created with
+  const lintRef = useRef<() => Promise<void>>(async () => undefined);
+  // The notice that offers to undo "Clear editor"; it goes away as soon as the user writes something
+  const undoToastRef = useRef<string | null>(null);
+  // Same idea for "Undo" after ignoring a rule
+  const undoIgnoreRef = useRef<(rule: string, hidden: number[]) => void>(() => undefined);
 
-  // Avoid hydration mismatch
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-
-  const handleLint = async () => {
+  const handleLint = useCallback(async (): Promise<void> => {
+    if (loading) return;
     if (!text.trim()) {
-      alert('Please enter some text to lint.');
+      toast.notify({ id: 'empty-text', message: t('error.emptyText') });
+      editorHandleRef.current?.focus();
       return;
     }
 
@@ -58,28 +271,89 @@ export default function Home() {
       setText(normalizedText);
     }
 
+    const fail = (message: string, canRetry: boolean): void => {
+      setReviewError(message);
+      toast.notify({
+        id: 'review-error',
+        kind: 'error',
+        message,
+        action: canRetry ? { label: t('toast.retry'), onClick: () => void lintRef.current() } : undefined,
+      });
+    };
+
+    toast.dismiss('review-error');
+    setReviewError(null);
     setLoading(true);
     setResults([]);
+    setResolvedIds(new Set());
+    setPositions(new Map());
+    setSnapshot(null);
     try {
       const response = await fetch('/api/lint', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: normalizedText, style, customRules }),
+        body: JSON.stringify({
+          text: normalizedText,
+          style,
+          format,
+          customRules,
+          vocabulary: {
+            accept: usableTerms(vocabulary.accept),
+            reject: usableTerms(vocabulary.reject),
+            spelling: vocabulary.spelling,
+            enforceCase: vocabulary.enforceCase,
+          },
+          ignoredRules,
+          severities,
+        }),
       });
       const data = await response.json();
       if (response.ok && Array.isArray(data)) {
-        setResults(data as ValeAlert[]);
+        setResults((data as ValeAlert[]).map((alert, id) => ({ ...alert, id })));
+        // the server already applied the severities of the rules
+        setAppliedSeverities({});
+        setSnapshot({ text: normalizedText, style, rulesKey: getRulesKey(customRules, vocabulary, format, ignoredRules, severities), at: new Date() });
+        // On a phone the results are on another tab: take the user there
+        if (!window.matchMedia(DESKTOP_QUERY).matches) setView('alerts');
       } else {
         console.error('Linting error:', data);
-        alert('Linting failed: ' + (data.error || 'Unknown error'));
+        // A busy server or a rate limit may pass; a text that is too long or a bad rule will not
+        const code = typeof data === 'object' && data !== null ? (data as { code?: unknown }).code : undefined;
+        fail(t('error.lintFailed', { message: describeApiError(data, t) }), code === 'busy' || code === 'rate_limited');
       }
     } catch (error) {
       console.error('Failed to lint:', error);
-      alert('Failed to connect to the linting service.');
+      fail(t('error.connection'), true);
     } finally {
       setLoading(false);
     }
-  };
+  }, [loading, text, style, format, customRules, vocabulary, ignoredRules, severities, t, toast]);
+
+  useEffect(() => {
+    lintRef.current = handleLint;
+  });
+
+  // Ctrl/Cmd + Enter runs the review from anywhere, including with the sidebar closed
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+        event.preventDefault();
+        void handleLint();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleLint]);
+
+  // On a phone the settings are a drawer: Escape closes it
+  useEffect(() => {
+    if (sidebarOpen !== true || isDesktop) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setSidebarOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [sidebarOpen, isDesktop]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -105,6 +379,9 @@ export default function Home() {
     reader.onload = (event) => {
       const content = (event.target?.result as string).replace(/\r\n/g, '\n');
       setText(content);
+      // A .adoc file is AsciiDoc and a .md file is Markdown: the extension says which
+      const detected = detectFormat(file.name);
+      if (detected) setFormat(detected);
     };
     reader.readAsText(file);
     if (docInputRef.current) docInputRef.current.value = '';
@@ -120,160 +397,441 @@ export default function Home() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const clearEditor = () => {
-    if (text && confirm('Are you sure you want to clear the editor?')) {
-      setText('');
-      setResults([]);
-    }
+  // "Start fresh" on the restored-draft notice: forget the stored draft and empty the editor
+  const discardDraft = (): void => {
+    draft.discard();
+    setText('');
+    setCustomRules([]);
+    setResults([]);
+    setResolvedIds(new Set());
+    setSnapshot(null);
   };
 
-  const handleScroll = (e: React.UIEvent<HTMLElement>) => {
-    const source = e.currentTarget;
-    const target = source === editorRef.current ? previewRef.current : editorRef.current;
+  /**
+   * Clears at once and offers to undo, instead of asking "are you sure?" first. A question gets
+   * answered by habit; being able to take it back protects the text however it was cleared.
+   */
+  const clearEditor = (): void => {
+    if (!text) return;
+    const previous = { text, results, resolvedIds, snapshot };
 
-    if (target) {
-      const percentage = source.scrollTop / (source.scrollHeight - source.clientHeight);
-      target.scrollTop = percentage * (target.scrollHeight - target.clientHeight);
-    }
+    setText('');
+    setResults([]);
+    setResolvedIds(new Set());
+    setSnapshot(null);
+    setReviewError(null);
+
+    undoToastRef.current = toast.notify({
+      id: 'cleared',
+      message: t('toast.cleared'),
+      durationMs: 10000,
+      action: {
+        label: t('toast.undo'),
+        onClick: () => {
+          // The review comes back too: it is still valid for the same text
+          setText(previous.text);
+          setResults(previous.results);
+          setResolvedIds(previous.resolvedIds);
+          setSnapshot(previous.snapshot);
+          undoToastRef.current = null;
+        },
+      },
+    });
   };
 
-  const handleAlertClick = (alert: ValeAlert, e: React.MouseEvent) => {
-    // Prevent the click from being handled by parent elements if we clicked a link
-    if ((e.target as HTMLElement).closest('a')) return;
+  // Undo only makes sense while the editor is still empty: once the user writes, it would overwrite their work
+  useEffect(() => {
+    if (undoToastRef.current && text !== '') {
+      toast.dismiss(undoToastRef.current);
+      undoToastRef.current = null;
+    }
+  }, [text, toast]);
+
+  // On a phone the keyboard stays closed: the selection is shown without focusing the editor
+  const revealAlert = (id: number): void => {
+    editorHandleRef.current?.reveal(id, { focus: isDesktop });
+  };
+
+  const handleAlertClick = (alert: ReviewAlert, e: React.MouseEvent) => {
+    // Prevent the click from being handled by parent elements if we clicked a link or a button
+    if ((e.target as HTMLElement).closest('a, button, select')) return;
 
     e.preventDefault();
     e.stopPropagation();
 
-    if (!editorRef.current) return;
-
-    const textarea = editorRef.current;
-    // Use the actual textarea value which has normalized newlines
-    const currentValue = textarea.value;
-    const lines = currentValue.split('\n');
-    let offset = 0;
-
-    // Calculate offset based on current textarea value
-    for (let i = 0; i < Math.min(alert.Line - 1, lines.length); i++) {
-      offset += lines[i].length + 1; // +1 for \n
+    if (view === 'editor') {
+      revealAlert(alert.id);
+    } else {
+      // The editor is hidden (preview or alerts tab): show it first, then select the text
+      pendingRevealRef.current = alert.id;
+      setView('editor');
     }
-
-    const start = offset + alert.Span[0] - 1;
-    const end = offset + alert.Span[1];
-
-    // Use a shadow textarea to calculate the scroll position accurately (handles wrapping)
-    const shadow = document.createElement('textarea');
-    const style = window.getComputedStyle(textarea);
-    const props = [
-      'width', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
-      'font-size', 'font-family', 'line-height', 'box-sizing',
-      'word-wrap', 'white-space', 'letter-spacing', 'text-transform',
-      'text-align', 'text-indent', 'overflow-wrap'
-    ];
-
-    // Copy styles to shadow textarea
-    props.forEach(prop => {
-      shadow.style.setProperty(prop, style.getPropertyValue(prop));
-    });
-
-    shadow.style.position = 'absolute';
-    shadow.style.visibility = 'hidden';
-    shadow.style.height = '0';
-    shadow.style.overflow = 'hidden';
-
-    // Measure height up to the end of the selection
-    shadow.value = currentValue.substring(0, end);
-    document.body.appendChild(shadow);
-    const selectionBottom = shadow.scrollHeight;
-    document.body.removeChild(shadow);
-
-    // Center the selection
-    const scrollTo = selectionBottom - (textarea.clientHeight / 2);
-    textarea.scrollTop = Math.max(0, scrollTo);
-
-    textarea.focus();
-    // Setting selection range after focus and scroll for better compatibility
-    textarea.setSelectionRange(start, end);
   };
 
+  // Runs once the editor is visible again, because a hidden editor cannot scroll to the text
+  useEffect(() => {
+    if (view === 'editor' && pendingRevealRef.current !== null) {
+      const id = pendingRevealRef.current;
+      pendingRevealRef.current = null;
+      revealAlert(id);
+    }
+  });
+
+  /** Adds the word of a spelling alert to the accepted terms, and clears every alert for that word. */
+  const acceptTerm = (id: number): void => {
+    const source = results.find((candidate) => candidate.id === id);
+    if (!source) return;
+    const term = source.Match.trim();
+
+    if (!vocabulary.accept.includes(term)) {
+      if (vocabulary.accept.length >= MAX_VOCABULARY_TERMS) {
+        toast.notify({ id: 'vocabulary-full', kind: 'error', message: t('vocab.full', { max: MAX_VOCABULARY_TERMS }) });
+        return;
+      }
+      setVocabulary({ ...vocabulary, accept: [...vocabulary.accept, term] });
+    }
+
+    const sameWord = results
+      .filter((candidate) => candidate.Check === source.Check && candidate.Match === source.Match)
+      .map((candidate) => candidate.id);
+    setResolvedIds((previous) => new Set([...previous, ...sameWord]));
+    editorHandleRef.current?.dismiss(sameWord);
+  };
+
+  /**
+   * Switches a rule off and hides its alerts at once. The review stays current: taking a rule's
+   * alerts away is exactly what the server would do with the rule ignored. Undo is offered in a
+   * notice rather than a question.
+   */
+  const ignoreRule = (rule: string): void => {
+    if (!isRuleName(rule) || ignoredRules.includes(rule)) return;
+    if (ignoredRules.length >= MAX_IGNORED_RULES) {
+      toast.notify({ id: 'ignored-full', kind: 'error', message: t('ignore.full', { max: MAX_IGNORED_RULES }) });
+      return;
+    }
+
+    const hidden = results.filter((candidate) => candidate.Check === rule && !resolvedIds.has(candidate.id)).map((candidate) => candidate.id);
+    const next = [...ignoredRules, rule];
+    setIgnoredRules(next);
+    setResolvedIds(new Set([...resolvedIds, ...hidden]));
+    editorHandleRef.current?.dismiss(hidden);
+    // Only a review that was current stays current: a stale one is stale for other reasons too
+    const before = getRulesKey(customRules, vocabulary, format, ignoredRules, severities);
+    const after = getRulesKey(customRules, vocabulary, format, next, severities);
+    setSnapshot((current) => (current && current.rulesKey === before ? { ...current, rulesKey: after } : current));
+
+    toast.notify({
+      id: 'ignored-rule',
+      message: t('ignore.done', { rule, count: hidden.length }),
+      durationMs: 10000,
+      action: { label: t('toast.undo'), onClick: () => undoIgnoreRef.current(rule, hidden) },
+    });
+  };
+
+  const undoIgnore = (rule: string, hidden: number[]): void => {
+    const next = ignoredRules.filter((candidate) => candidate !== rule);
+    const stillResolved = new Set(resolvedIds);
+    hidden.forEach((id) => stillResolved.delete(id));
+    setIgnoredRules(next);
+    setResolvedIds(stillResolved);
+    const before = getRulesKey(customRules, vocabulary, format, ignoredRules, severities);
+    const after = getRulesKey(customRules, vocabulary, format, next, severities);
+    setSnapshot((current) => (current && current.rulesKey === before ? { ...current, rulesKey: after } : current));
+    // The underlines come back only while the document is still the reviewed one, and without the
+    // alerts that were resolved for other reasons. A new array is what makes the editor draw again.
+    if (snapshot && snapshot.text === text.replace(/\r\n/g, '\n')) {
+      setResults(results.filter((candidate) => !stillResolved.has(candidate.id)));
+    }
+  };
+
+  useEffect(() => {
+    undoIgnoreRef.current = undoIgnore;
+  });
+
+  const stopIgnoring = (rule: string): void => {
+    setIgnoredRules((previous) => previous.filter((candidate) => candidate !== rule));
+  };
+
+  /**
+   * Gives a rule another severity. A severity belongs to the rule, not to the text, so it is shown
+   * on the alerts on screen at once, even if the text was edited since the review. The review stays
+   * current if it was, like ignoring a rule: that is what the next review would give.
+   */
+  const changeSeverity = (rule: string, severity: RuleSeverity): void => {
+    if (!isRuleName(rule) || severities[rule] === severity) return;
+    if (!(rule in severities) && Object.keys(severities).length >= MAX_SEVERITY_OVERRIDES) {
+      toast.notify({ id: 'severity-full', kind: 'error', message: t('severity.full', { max: MAX_SEVERITY_OVERRIDES }) });
+      return;
+    }
+
+    const next: SeverityOverrides = { ...severities, [rule]: severity };
+    const before = getRulesKey(customRules, vocabulary, format, ignoredRules, severities);
+    const after = getRulesKey(customRules, vocabulary, format, ignoredRules, next);
+    setSeverities(next);
+    setAppliedSeverities((previous) => ({ ...previous, [rule]: severity }));
+    setSnapshot((current) => (current && current.rulesKey === before ? { ...current, rulesKey: after } : current));
+  };
+
+  /** Back to the severity the style guide gives the rule. It is known only after a new review, so the review is out of date. */
+  const resetSeverity = (rule: string): void => {
+    setSeverities((previous) => Object.fromEntries(Object.entries(previous).filter(([name]) => name !== rule)));
+  };
+
+  const copyRuleLines = async (): Promise<void> => {
+    try {
+      // Ignored rules first: Vale keeps the first line of a key, so a rule that is also ignored
+      // stays off, as in the file the server writes
+      await navigator.clipboard.writeText([...buildIgnoreLines(ignoredRules), ...buildSeverityLines(severities)].join('\n'));
+      toast.notify({ id: 'ignored-copied', message: t('ignore.copied') });
+    } catch {
+      toast.notify({ id: 'ignored-copied', kind: 'error', message: t('ignore.copyFailed') });
+    }
+  };
+
+  const markResolved = useCallback((id: number): void => {
+    setResolvedIds((previous) => new Set(previous).add(id));
+  }, []);
+
+  const handleTabKeys = (event: React.KeyboardEvent<HTMLElement>, order: ViewMode[]): void => {
+    const current = order.indexOf(view);
+    const lastIndex = order.length - 1;
+    let next = -1;
+    if (event.key === 'ArrowRight') next = current >= lastIndex ? 0 : current + 1;
+    if (event.key === 'ArrowLeft') next = current <= 0 ? lastIndex : current - 1;
+    if (event.key === 'Home') next = 0;
+    if (event.key === 'End') next = lastIndex;
+    if (next < 0) return;
+
+    event.preventDefault();
+    setView(order[next]);
+    event.currentTarget.querySelector<HTMLElement>(`[data-tab="${order[next]}"]`)?.focus();
+  };
+
+  // Review state: results only count as current while the editor, style and rules still match
+  const normalizedText = text.replace(/\r\n/g, '\n');
+  const isStale =
+    snapshot !== null &&
+    (snapshot.text !== normalizedText || snapshot.style !== style || snapshot.rulesKey !== getRulesKey(customRules, vocabulary, format, ignoredRules, severities));
+  const textChanged = snapshot !== null && snapshot.text !== normalizedText;
+  const styleLabel = STYLE_OPTIONS.find((option) => option.value === style)?.label ?? style;
+  const severityEntries = Object.entries(severities);
+  const visibleAlerts = useMemo(() => results.filter((alert) => !resolvedIds.has(alert.id)), [results, resolvedIds]);
+  const currentLines = useMemo(() => normalizedText.split('\n'), [normalizedText]);
+  const reviewedLines = useMemo(() => (snapshot ? snapshot.text.split('\n') : []), [snapshot]);
+  const lineStarts = useMemo(() => {
+    const starts = [0];
+    for (let i = 0; i < normalizedText.length; i += 1) {
+      if (normalizedText.charCodeAt(i) === 10) starts.push(i + 1);
+    }
+    return starts;
+  }, [normalizedText]);
+
+  /** Line and column (both 1-based) of a document offset, by binary search over the line starts. */
+  const locate = (offset: number): { line: number; column: number } => {
+    let low = 0;
+    let high = lineStarts.length - 1;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (lineStarts[middle] <= offset) low = middle;
+      else high = middle - 1;
+    }
+    return { line: low + 1, column: offset - lineStarts[low] + 1 };
+  };
+
+  const reviewTime = snapshot ? formatTime(snapshot.at) : '';
+  const runLabel = t('header.run');
+  // Replaces the old "Live Editor" badge: the status always reflects the real state of the text
+  const statusLabel = loading
+    ? t('status.reviewing')
+    : reviewError
+      ? t('status.failed')
+      : snapshot === null
+      ? t('status.notReviewed')
+      : isStale
+        ? t('status.outOfDate')
+        : t('status.reviewedAt', { time: reviewTime });
+
+  const renderEmptyState = (): React.JSX.Element => {
+    if (loading) {
+      return (
+        <PanelMessage
+          icon={<LoaderCircle className="w-4 h-4 text-accent animate-spin motion-reduce:animate-none" />}
+          title={t('alerts.reviewingTitle')}
+          detail={t('alerts.reviewingDetail', { style: styleLabel })}
+        />
+      );
+    }
+    if (snapshot === null && reviewError) {
+      return (
+        <PanelMessage
+          icon={<TriangleAlert className="w-4 h-4 text-err" />}
+          title={t('alerts.failedTitle')}
+          detail={reviewError}
+          action={
+            <button
+              type="button"
+              onClick={() => void handleLint()}
+              className="min-h-9 border border-accent px-3 text-sm font-semibold text-accent hover:bg-accent hover:text-on-accent lg:min-h-0 lg:py-1"
+            >
+              {t('toast.retry')}
+            </button>
+          }
+        />
+      );
+    }
+    if (snapshot === null) {
+      return (
+        <PanelMessage
+          icon={<FileSearch className="w-4 h-4 text-ink-2" />}
+          title={t('alerts.notReviewedTitle')}
+          detail={t('alerts.notReviewedDetail', { run: runLabel, style: styleLabel })}
+        />
+      );
+    }
+    if (isStale) {
+      return (
+        <PanelMessage
+          icon={<FileSearch className="w-4 h-4 text-ink-2" />}
+          title={t('alerts.noOpenTitle')}
+          detail={t('alerts.noOpenDetail', { run: runLabel })}
+        />
+      );
+    }
+    const lineCount = snapshot.text.split('\n').length;
+    return (
+      <PanelMessage
+        icon={<Check className="w-4 h-4 text-accent" />}
+        title={t('alerts.noAlertsTitle', { count: lineCount })}
+        detail={t('alerts.noAlertsDetail', { time: reviewTime, style: styleLabel })}
+      />
+    );
+  };
+
+  const staleMessage = t(textChanged ? 'alerts.staleText' : 'alerts.staleRules', { run: runLabel });
+
+  const secondaryButton =
+    'flex w-full items-center justify-center gap-2 border border-rule bg-transparent px-3 py-2.5 text-sm font-medium text-ink hover:border-ink-2 hover:bg-paper';
+  // Larger touch targets on phones, compact on desktop
+  const iconButton = 'p-2.5 text-ink-2 hover:bg-select hover:text-ink lg:p-1.5';
+
+  const tabClass = (selected: boolean): string =>
+    `flex h-full items-center px-4 text-sm font-semibold border-b-2 ${
+      selected ? 'border-accent text-ink' : 'border-transparent text-ink-2 hover:text-ink'
+    }`;
+  const mobileTabClass = (selected: boolean): string =>
+    `flex flex-1 items-center justify-center gap-2 border-t-2 py-3 text-sm font-semibold ${
+      selected ? 'border-accent text-ink' : 'border-transparent text-ink-2'
+    }`;
+
+  // Mobile shows one panel at a time. On desktop the alerts are always visible next to the
+  // editor, and the editor/preview tabs switch the left pane.
+  const documentPaneClass = view === 'alerts' ? 'hidden lg:flex' : 'flex';
+  const alertsPaneClass = view === 'alerts' ? 'flex' : 'hidden lg:flex';
+
   return (
-    <div className="flex h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 overflow-hidden font-sans">
-      {/* Sidebar */}
-      <aside className={`${sidebarOpen ? 'w-80' : 'w-0'} transition-all duration-300 ease-in-out bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col overflow-hidden shrink-0`}>
-        <div className="p-6 border-b border-gray-100 dark:border-gray-800 flex justify-between items-center">
-          <h2 className="font-bold text-xl text-blue-800 dark:text-blue-400 tracking-tight">Settings</h2>
-          <button onClick={() => setSidebarOpen(false)} className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
-            <X className="w-5 h-5" />
+    <div className="flex h-dvh overflow-hidden bg-paper font-sans text-ink">
+      {/* Backdrop for the mobile drawer */}
+      {sidebarOpen === true && (
+        <button
+          type="button"
+          tabIndex={-1}
+          aria-hidden="true"
+          onClick={() => setSidebarOpen(false)}
+          className="fixed inset-0 z-20 bg-ink/40 lg:hidden"
+        />
+      )}
+
+      {/* Settings: a drawer on phones, a column on desktop. `inert` keeps hidden controls out of the tab order. */}
+      <aside
+        inert={!sidebarVisible}
+        aria-label={t('settings.title')}
+        className={`fixed inset-y-0 left-0 z-30 flex w-72 shrink-0 flex-col overflow-hidden border-r border-rule bg-sheet transition-[transform,width] duration-200 motion-reduce:transition-none lg:static lg:z-auto ${
+          sidebarOpen === true ? 'translate-x-0' : '-translate-x-full'
+        } ${sidebarOpen === false ? 'lg:w-0 lg:translate-x-0' : 'lg:w-72 lg:translate-x-0'}`}
+      >
+        <div className="flex h-14 shrink-0 items-center justify-between border-b border-rule px-5">
+          <h2 className="text-base font-bold text-ink">{t('settings.title')}</h2>
+          <button onClick={() => setSidebarOpen(false)} aria-label={t('settings.close')} className={iconButton}>
+            <X className="h-4 w-4" />
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar">
+        <div className="custom-scrollbar flex-1 space-y-7 overflow-y-auto p-5">
           {/* Style Guide Selection */}
-          <div className="space-y-3">
-            <label className="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest block">Base Style Guide</label>
+          <div className="space-y-2">
+            <label htmlFor="style-guide" className="block text-xs font-semibold text-ink-2">{t('settings.styleGuide')}</label>
+            {/* 16 px on phones: smaller text makes iOS zoom the page when a field is focused */}
             <select
+              id="style-guide"
               value={style}
               onChange={(e) => setStyle(e.target.value)}
-              className="w-full p-3 border border-gray-200 dark:border-gray-700 rounded-xl bg-gray-50 dark:bg-gray-800 focus:ring-2 focus:ring-blue-500 outline-none transition cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100"
+              className="w-full cursor-pointer border border-rule bg-paper px-3 py-2.5 text-base font-medium text-ink lg:text-sm"
             >
-              <option value="Google">Google Developer</option>
-              <option value="Microsoft">Microsoft Writing</option>
-              <option value="RedHat">Red Hat Style</option>
+              {STYLE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
             </select>
-            <p className="text-[11px] text-gray-500 leading-relaxed italic">
-              Primary ruleset for validation.
-            </p>
+            <p className="text-xs text-ink-2">{t('settings.styleGuideHelp')}</p>
           </div>
 
           {/* Document Upload */}
-          <div className="space-y-3">
-            <label className="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest block">Document</label>
-            <button
-              onClick={() => docInputRef.current?.click()}
-              className="w-full py-3 px-4 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400 rounded-xl font-bold hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-all flex items-center justify-center gap-2 group"
+          <div className="space-y-2">
+            <label htmlFor="document-format" className="block text-xs font-semibold text-ink-2">{t('settings.format')}</label>
+            <select
+              id="document-format"
+              value={format}
+              onChange={(e) => setFormat(e.target.value === 'asciidoc' ? 'asciidoc' : 'markdown')}
+              className="w-full cursor-pointer border border-rule bg-paper px-3 py-2.5 text-base font-medium text-ink lg:text-sm"
             >
-              <FileText className="w-4 h-4 group-hover:scale-110 transition-transform" />
-              <span className="text-sm">Upload MD/MDX</span>
+              {FORMAT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+            <button onClick={() => docInputRef.current?.click()} className={secondaryButton}>
+              <FileText className="h-4 w-4" />
+              <span>{t('settings.uploadDocument')}</span>
             </button>
             <input
               type="file"
               ref={docInputRef}
               onChange={handleDocUpload}
-              accept=".md,.mdx"
+              accept={DOCUMENT_ACCEPT}
               className="hidden"
             />
           </div>
 
           {/* Custom Rules */}
-          <div className="space-y-4">
-            <div className="flex justify-between items-center">
-              <label className="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Custom Rules</label>
+          <div className="space-y-2">
+            <div className="flex items-baseline justify-between">
+              <span className="text-xs font-semibold text-ink-2">{t('settings.customRules')}</span>
               <a
                 href="/example-style.yml"
                 download
-                className="text-[10px] font-bold text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 underline flex items-center gap-1"
+                className="text-xs font-medium text-accent underline underline-offset-2"
               >
-                <Upload className="w-3 h-3" />
-                Example
+                {t('settings.downloadExample')}
               </a>
             </div>
 
-            <div className="space-y-2">
-              {customRules.map((rule, idx) => (
-                <div key={idx} className="flex items-center justify-between p-2.5 bg-blue-50/50 dark:bg-blue-900/20 rounded-lg border border-blue-100/50 dark:border-blue-800/50">
-                  <span className="text-[11px] font-mono truncate mr-2 text-blue-700 dark:text-blue-400">{rule.name}</span>
-                  <button onClick={() => removeCustomRule(idx)} className="text-blue-300 hover:text-red-500 transition-colors">
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              ))}
-            </div>
+            {customRules.length > 0 && (
+              <ul className="border-t border-rule">
+                {customRules.map((rule, idx) => (
+                  <li key={idx} className="flex items-center justify-between border-b border-rule py-1.5">
+                    <span className="mr-2 truncate font-mono text-xs text-ink">{rule.name}</span>
+                    <button onClick={() => removeCustomRule(idx)} aria-label={t('settings.removeRule', { name: rule.name })} className="p-2 text-ink-2 hover:text-err lg:p-1">
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
 
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="w-full py-4 px-4 border-2 border-dashed border-gray-200 dark:border-gray-700 rounded-xl text-gray-400 dark:text-gray-500 hover:border-blue-400 hover:text-blue-500 transition-all flex flex-col items-center gap-2 group"
+              className="flex w-full items-center justify-center gap-2 border border-dashed border-ink-2 px-3 py-3 text-sm font-medium text-ink-2 hover:border-ink hover:text-ink"
             >
-              <Upload className="w-5 h-5 group-hover:scale-110 transition-transform" />
-              <span className="text-[10px] font-black uppercase tracking-widest">Upload .yml rule</span>
+              <Upload className="h-4 w-4" />
+              <span>{t('settings.uploadRule')}</span>
             </button>
             <input
               type="file"
@@ -284,198 +842,395 @@ export default function Home() {
               multiple
             />
           </div>
-        </div>
 
-        <div className="p-6 border-t border-gray-100 dark:border-gray-800">
-          <button
-            onClick={handleLint}
-            disabled={loading}
-            className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-blue-200 dark:shadow-none hover:bg-blue-700 disabled:bg-blue-300 dark:disabled:bg-blue-900/50 transition-all active:scale-[0.98] flex items-center justify-center gap-3 group"
-          >
-            {loading ? (
-              <PlayCircle className="animate-spin h-5 w-5 text-white" />
+          {/* Vocabulary */}
+          <div className="space-y-2">
+            <span className="block text-xs font-semibold text-ink-2">{t('settings.vocabulary')}</span>
+            <p data-testid="vocabulary-summary" className="text-sm text-ink">
+              {t('vocab.summary', { accepted: vocabulary.accept.length, rejected: vocabulary.reject.length })}
+              <span className="block text-xs text-ink-2">{vocabulary.spelling ? t('vocab.spellingOn') : t('vocab.spellingOff')}</span>
+            </p>
+            <button onClick={() => setVocabularyOpen(true)} className={secondaryButton}>
+              {t('vocab.open')}
+            </button>
+          </div>
+
+          {/* Ignored rules */}
+          <div data-testid="ignored-rules" className="space-y-2">
+            <span className="block text-xs font-semibold text-ink-2">{t('settings.ignoredRules')}</span>
+            {ignoredRules.length === 0 ? (
+              <p className="text-xs text-ink-2">{t('ignore.none')}</p>
             ) : (
-              <PlayCircle className="h-5 w-5 group-hover:rotate-12 transition-transform" />
+              <>
+                <p data-testid="ignored-summary" className="text-sm text-ink">{t('ignore.summary', { count: ignoredRules.length })}</p>
+                <ul className="border-t border-rule">
+                  {ignoredRules.map((rule) => (
+                    <li key={rule} className="flex items-center justify-between border-b border-rule py-1.5">
+                      <span className="mr-2 truncate font-mono text-xs text-ink">{rule}</span>
+                      <button onClick={() => stopIgnoring(rule)} aria-label={t('ignore.remove', { rule })} className="p-2 text-ink-2 hover:text-err lg:p-1">
+                        <X className="h-4 w-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-xs text-ink-2">{t('ignore.help')}</p>
+              </>
             )}
-            <span className="tracking-widest uppercase text-sm">{loading ? 'Analyzing...' : 'Run Linting'}</span>
-          </button>
+          </div>
+
+          {/* Severities */}
+          <div data-testid="rule-severities" className="space-y-2">
+            <span className="block text-xs font-semibold text-ink-2">{t('settings.ruleSeverities')}</span>
+            {severityEntries.length === 0 ? (
+              <p className="text-xs text-ink-2">{t('severity.none')}</p>
+            ) : (
+              <>
+                <p data-testid="severity-summary" className="text-sm text-ink">{t('severity.summary', { count: severityEntries.length })}</p>
+                <ul className="border-t border-rule">
+                  {severityEntries.map(([rule, level]) => (
+                    <li key={rule} className="flex items-center gap-2 border-b border-rule py-1.5">
+                      <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink">{rule}</span>
+                      {/* 16 px on phones: smaller text makes iOS zoom the page when a field is focused */}
+                      <select
+                        aria-label={t('severity.change', { rule })}
+                        value={level}
+                        onChange={(e) => {
+                          if (isRuleSeverity(e.target.value)) changeSeverity(rule, e.target.value);
+                        }}
+                        className="cursor-pointer border border-rule bg-paper px-1.5 py-1.5 text-base text-ink lg:py-0.5 lg:text-xs"
+                      >
+                        {RULE_SEVERITIES.map((option) => (
+                          <option key={option} value={option}>{getSeverityLabel(option, t)}</option>
+                        ))}
+                      </select>
+                      <button onClick={() => resetSeverity(rule)} aria-label={t('severity.reset', { rule })} className="p-2 text-ink-2 hover:text-err lg:p-1">
+                        <X className="h-4 w-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-xs text-ink-2">{t('severity.help')}</p>
+              </>
+            )}
+          </div>
+
+          {/* One copy for both lists: the lines are what the server writes, so they work in a repository */}
+          {(severityEntries.length > 0 || ignoredRules.length > 0) && (
+            <button onClick={() => void copyRuleLines()} className={secondaryButton}>
+              <Copy className="h-4 w-4" />
+              <span>{t('ignore.copy')}</span>
+            </button>
+          )}
+
+          {/* Drafts */}
+          <div className="space-y-2">
+            <span className="block text-xs font-semibold text-ink-2">{t('settings.drafts')}</span>
+            <label className="flex cursor-pointer items-start gap-3 text-sm text-ink">
+              <input
+                type="checkbox"
+                checked={draft.enabled}
+                onChange={(e) => draft.setEnabled(e.target.checked)}
+                className="mt-0.5 h-5 w-5 shrink-0 accent-accent lg:h-4 lg:w-4"
+              />
+              <span>
+                {t('settings.saveDraft')}
+                <span className="mt-0.5 block text-xs text-ink-2">{t('settings.saveDraftHelp')}</span>
+              </span>
+            </label>
+          </div>
+
+          {/* Language: the label is bilingual so it can be found from the wrong language */}
+          <div className="space-y-2">
+            <label htmlFor="language" className="block text-xs font-semibold text-ink-2">{t('settings.language')}</label>
+            <select
+              id="language"
+              value={locale}
+              onChange={(e) => {
+                if (isLocale(e.target.value)) setLocale(e.target.value);
+              }}
+              className="w-full cursor-pointer border border-rule bg-paper px-3 py-2.5 text-base font-medium text-ink lg:text-sm"
+            >
+              {LOCALES.map((code) => (
+                <option key={code} value={code} lang={code}>{LOCALE_NAMES[code]}</option>
+              ))}
+            </select>
+          </div>
         </div>
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* Top Header */}
-        <header className="h-16 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between px-8 shrink-0">
-          <div className="flex items-center gap-4">
-            {!sidebarOpen && (
-              <button onClick={() => setSidebarOpen(true)} className="p-2 text-gray-500 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
-                <Sidebar className="w-6 h-6" />
-              </button>
-            )}
-            <h1 className="text-xl font-black text-gray-800 dark:text-gray-100 tracking-tight">
-              Writer<span className="text-blue-600">Assistant</span>
+        <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-rule bg-sheet px-3 sm:px-5">
+          <div className="flex min-w-0 items-center gap-1 sm:gap-3">
+            {/* Always available on phones; on desktop only after the sidebar was closed */}
+            <button
+              onClick={() => setSidebarOpen(true)}
+              aria-label={t('settings.open')}
+              className={`${iconButton} ${sidebarOpen === false ? '' : 'lg:hidden'}`}
+            >
+              <Settings className="h-5 w-5" />
+            </button>
+            {/* The wavy underline is the universal "linter found something" mark */}
+            <h1 className="font-mono text-base font-semibold text-ink underline decoration-err decoration-wavy decoration-[1.5px] underline-offset-[5px] sm:text-lg">
+              verbalize
             </h1>
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 sm:gap-3">
+            <span
+              data-testid="review-status"
+              className={`hidden font-mono text-xs sm:inline ${isStale || reviewError ? 'font-semibold text-warn' : 'text-ink-2'}`}
+            >
+              {statusLabel}
+            </span>
+            <button
+              onClick={() => void handleLint()}
+              disabled={loading}
+              title={t('header.runTitle')}
+              className="flex items-center gap-2 border border-accent bg-accent px-3 py-2 text-sm font-bold text-on-accent hover:bg-ink hover:border-ink disabled:cursor-wait disabled:bg-ink-2 disabled:border-ink-2 sm:px-4 lg:py-1.5"
+            >
+              {loading ? <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <PlayCircle className="h-4 w-4" />}
+              <span>{loading ? t('header.running') : runLabel}</span>
+              <kbd className="hidden font-mono text-xs font-normal md:inline">Ctrl ↵</kbd>
+            </button>
             {mounted && (
               <button
-                onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-                className="p-2 rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
-                title="Toggle Theme"
+                onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}
+                className="border border-rule p-2.5 text-ink-2 hover:border-ink-2 hover:text-ink lg:p-1.5"
+                title={t('header.toggleTheme')}
+                aria-label={t('header.toggleTheme')}
               >
-                {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+                {resolvedTheme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
               </button>
             )}
-            <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-gray-100 dark:bg-gray-800 rounded-full">
-               <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-               <span className="text-[10px] font-black text-gray-500 dark:text-gray-400 uppercase tracking-widest">Live Editor</span>
-            </div>
           </div>
         </header>
 
-        {/* 3-Column Grid */}
-        <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 overflow-hidden">
+        {/* One panel at a time on phones; document (editor or preview) beside the alerts on desktop */}
+        <div className="flex min-h-0 flex-1 flex-col lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(22rem,30%)]">
 
-          {/* Column 1: Editor */}
-          <section className="flex flex-col border-r border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
-            <div className="h-12 px-6 flex items-center justify-between border-b border-gray-50 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50 shrink-0">
-              <div className="flex items-center gap-3">
-                <span className="text-[10px] font-black uppercase tracking-widest text-gray-400 dark:text-gray-500 flex items-center gap-2">
-                  <div className="w-1.5 h-1.5 rounded-full bg-blue-500"></div>
-                  Editor
-                </span>
-                <span className="text-[9px] bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded text-gray-500 dark:text-gray-400 font-mono italic">{text.length} chars</span>
+          {/* Document: editor or preview */}
+          <section aria-label={t('editor.documentRegion')} className={`${documentPaneClass} min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-sheet lg:border-r lg:border-rule`}>
+            <div className="flex h-10 shrink-0 items-center justify-between border-b border-rule bg-paper pl-4 pr-2 lg:pl-0">
+              <div className="flex h-full items-center">
+                <div
+                  role="tablist"
+                  aria-label={t('editor.documentView')}
+                  onKeyDown={(e) => handleTabKeys(e, TAB_ORDER_DESKTOP)}
+                  className="hidden h-full lg:flex"
+                >
+                  <TabButton mode="editor" scope="desktop" selected={view !== 'preview'} onSelect={setView} className={tabClass(view !== 'preview')}>{t('editor.editor')}</TabButton>
+                  <TabButton mode="preview" scope="desktop" selected={view === 'preview'} onSelect={setView} className={tabClass(view === 'preview')}>{t('editor.preview')}</TabButton>
+                </div>
+                <span className="lg:hidden"><ColumnLabel>{view === 'preview' ? t('editor.preview') : t('editor.editor')}</ColumnLabel></span>
+                <span className="ml-3 font-mono text-xs text-ink-2">{t('editor.chars', { count: text.length })}</span>
+                <span className="ml-3"><DraftStatusLabel status={draft.status} /></span>
               </div>
-              <div className="flex gap-1">
-                <button onClick={copyToClipboard} title="Copy Content" className={`p-1.5 rounded-md transition-colors ${copied ? 'text-green-500 bg-green-50 dark:bg-green-900/20' : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'}`}>
-                  {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                </button>
-                <button onClick={clearEditor} title="Clear All" className="p-1.5 rounded-md text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-            <textarea
-              ref={editorRef}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onScroll={handleScroll}
-              className="flex-1 p-8 outline-none resize-none font-mono text-sm leading-relaxed text-gray-700 dark:text-gray-200 bg-transparent custom-scrollbar"
-              placeholder="Start typing your documentation (Markdown supported)..."
-            />
-          </section>
-
-          {/* Column 2: Preview */}
-          <section className="flex flex-col border-r border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
-            <div className="h-12 px-6 flex items-center border-b border-gray-50 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50 shrink-0">
-              <span className="text-[10px] font-black uppercase tracking-widest text-gray-400 dark:text-gray-500 flex items-center gap-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-green-500"></div>
-                Preview
-              </span>
-            </div>
-            <div
-              ref={previewRef}
-              onScroll={handleScroll}
-              className="flex-1 p-10 overflow-y-auto custom-scrollbar"
-            >
-              <article className="prose prose-slate dark:prose-invert max-w-none prose-headings:font-black prose-headings:tracking-tight prose-a:text-blue-600 prose-img:rounded-xl">
-                {/* ReactMarkdown is secure by default as it does not render HTML unless explicitly configured with rehype-raw */}
-                <ReactMarkdown>{text || '*Rich preview will appear here...*'}</ReactMarkdown>
-              </article>
-            </div>
-          </section>
-
-          {/* Column 3: Results */}
-          <section className="flex flex-col bg-gray-50/30 dark:bg-gray-900/50 overflow-hidden">
-            <div className="h-12 px-6 flex items-center justify-between border-b border-gray-50 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50 shrink-0">
-              <span className="text-[10px] font-black uppercase tracking-widest text-gray-400 dark:text-gray-500 flex items-center gap-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-red-500"></div>
-                Linting Alerts
-                {results.length > 0 && (
-                  <span className="bg-red-500 text-white px-1.5 py-0.5 rounded text-[8px] font-bold">{results.length}</span>
-                )}
-              </span>
-              {results.length > 0 && (
-                <button onClick={() => setResults([])} className="text-[9px] font-bold text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 uppercase tracking-tighter">Clear</button>
+              {view !== 'preview' && (
+                <div className="flex gap-1">
+                  <button onClick={copyToClipboard} title={t('editor.copy')} aria-label={t('editor.copy')} className={`${iconButton} ${copied ? 'text-accent' : ''}`}>
+                    {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                  </button>
+                  <button onClick={clearEditor} title={t('editor.clear')} aria-label={t('editor.clear')} className={`${iconButton} hover:text-err`}>
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
               )}
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-              {results.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center text-center opacity-40 grayscale pointer-events-none">
-                  <div className="bg-white dark:bg-gray-800 p-4 rounded-full shadow-sm mb-4">
-                    <Check className="w-8 h-8 text-green-500" />
-                  </div>
-                  <p className="text-xs font-black text-gray-500 dark:text-gray-400 uppercase tracking-widest">Document Clean</p>
-                  <p className="text-[10px] mt-1">No style violations detected.</p>
-                </div>
+            {draft.restoredAt && (
+              <RestoredNotice restoredAt={draft.restoredAt} onDismiss={draft.dismissRestored} onDiscard={discardDraft} />
+            )}
+
+            <div id="panel-editor" role="tabpanel" aria-label={t('editor.editor')} className={`${view === 'preview' ? 'hidden' : 'flex'} min-h-0 flex-1 flex-col`}>
+              <LintEditor
+                ref={editorHandleRef}
+                // 16 px on phones: smaller text makes iOS zoom the page when the editor is focused
+                className="min-h-0 flex-1 overflow-hidden text-base lg:text-[14.5px]"
+                value={text}
+                onChange={setText}
+                alerts={results}
+                reviewedText={snapshot?.text ?? null}
+                onPositionsChange={setPositions}
+                onFixApplied={markResolved}
+                onAcceptTerm={acceptTerm}
+                onIgnoreRule={ignoreRule}
+                severityOverrides={appliedSeverities}
+                format={format}
+                placeholderText={t(format === 'asciidoc' ? 'editor.placeholderAsciidoc' : 'editor.placeholder')}
+                ariaLabel={t('editor.ariaLabel')}
+              />
+            </div>
+
+            <div id="panel-preview" role="tabpanel" aria-label={t('editor.preview')} className={`${view === 'preview' ? 'block' : 'hidden'} custom-scrollbar min-h-0 flex-1 overflow-y-auto p-5 lg:p-8`}>
+              {format === 'asciidoc' ? (
+                view === 'preview' && <AsciidocPreview source={text} />
               ) : (
-                <div className="space-y-3">
-                  {results.map((alert, index) => (
-                    <div
-                      key={index}
-                      onClick={(e) => handleAlertClick(alert, e)}
-                      className={`p-4 rounded-xl border bg-white dark:bg-gray-800 shadow-sm transition-all hover:scale-[1.01] hover:shadow-md hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer group ${
-                        alert.Severity === 'error' ? 'border-red-100 dark:border-red-900/30' :
-                        alert.Severity === 'warning' ? 'border-yellow-100 dark:border-yellow-900/30' : 'border-blue-100 dark:border-blue-900/30'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between mb-2">
-                        <span className={`text-[8px] font-black uppercase px-2 py-0.5 rounded shadow-sm ${
-                          alert.Severity === 'error' ? 'bg-red-500 text-white' :
-                          alert.Severity === 'warning' ? 'bg-yellow-400 text-yellow-900' : 'bg-blue-500 text-white'
-                        }`}>
-                          {alert.Severity}
-                        </span>
-                        <span className="text-[10px] font-mono font-bold text-gray-400 dark:text-gray-500">Line {alert.Line}</span>
-                      </div>
-                      <p className="text-sm font-bold text-gray-800 dark:text-gray-200 leading-snug">{alert.Message}</p>
-                      <div className="mt-3 pt-3 border-t border-gray-50 dark:border-gray-700 flex items-center justify-between">
-                        <span className="text-[9px] text-gray-400 dark:text-gray-500 font-bold uppercase tracking-tight">{alert.Check}</span>
-                        {alert.Link && (
-                          <a href={alert.Link} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:text-blue-700 transition-colors" title="View in Style Guide">
-                             <ExternalLink className="w-3.5 h-3.5" />
+                <MarkdownPreview source={text} />
+              )}
+            </div>
+          </section>
+
+          {/* Alerts */}
+          <section id="panel-alerts" role="tabpanel" aria-label={t('editor.alerts')} className={`${alertsPaneClass} min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-paper`}>
+            <div className="flex h-10 shrink-0 items-center justify-between border-b border-rule px-4">
+              <div className="flex items-baseline gap-2">
+                <ColumnLabel>{t('editor.alerts')}</ColumnLabel>
+                {visibleAlerts.length > 0 && (
+                  <span className="font-mono text-xs font-semibold text-ink">{visibleAlerts.length}</span>
+                )}
+              </div>
+              {results.length > 0 && (
+                <button onClick={() => { setResults([]); setSnapshot(null); setReviewError(null); }} className="py-2 text-xs font-medium text-accent underline underline-offset-2">{t('alerts.clear')}</button>
+              )}
+            </div>
+
+            <div className="custom-scrollbar flex-1 overflow-y-auto">
+              {isStale && (
+                <div role="status" className="flex items-start gap-2 border-b border-rule bg-sheet px-4 py-3 text-sm font-medium text-warn">
+                  <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>{staleMessage}</span>
+                </div>
+              )}
+              {visibleAlerts.length === 0 ? (
+                renderEmptyState()
+              ) : (
+                <ol>
+                  {visibleAlerts.map((alert) => {
+                    // The editor reports where the alert is now; no position means its text was edited
+                    const live = positions.get(alert.id);
+                    const stale = textChanged && !live;
+                    // What the user set since the review wins over what Vale said
+                    const severity = appliedSeverities[alert.Check] ?? alert.Severity;
+                    const tone = getSeverityTone(severity);
+                    let line = alert.Line;
+                    let span: [number, number] = alert.Span;
+                    if (live) {
+                      const start = locate(live.from);
+                      const end = locate(Math.max(live.from, live.to - 1));
+                      line = start.line;
+                      span = [start.column, end.column];
+                    }
+                    const snippet = buildSnippet((live ? currentLines : reviewedLines)[line - 1] ?? '', span, line);
+                    const fixes = stale ? [] : getAlertFixes(alert);
+                    const canAccept = !stale && alert.Check === 'Vale.Spelling';
+                    // Ignoring a rule does not depend on where the alert is, so it works on a stale card too
+                    const canIgnore = isRuleName(alert.Check);
+                    const href = safeHttpUrl(alert.Link);
+                    return (
+                      <li
+                        key={alert.id}
+                        data-testid="alert-card"
+                        data-severity={severity}
+                        onClick={stale ? undefined : (e) => handleAlertClick(alert, e)}
+                        className={`border-b border-rule px-4 py-3 ${stale ? '' : 'cursor-pointer hover:bg-select'}`}
+                      >
+                        <div className="flex items-baseline gap-3 text-xs">
+                          <span className={`font-mono font-semibold underline decoration-[1.5px] underline-offset-4 ${tone.text} ${tone.decoration}`}>
+                            {getSeverityLabel(severity, t)}
+                          </span>
+                          <span className="min-w-0 truncate font-mono text-ink-2">{alert.Check}</span>
+                          <span className="ml-auto shrink-0 font-mono text-ink-2">
+                            {stale ? t('alerts.edited') : `L${line}:${span[0]}`}
+                          </span>
+                        </div>
+                        <p className={`mt-1.5 text-sm leading-snug text-ink ${stale ? 'italic' : ''}`}>{cleanVocabularyMessage(alert.Check, alert.Message)}</p>
+                        <pre className="custom-scrollbar mt-2 overflow-x-auto font-mono text-xs leading-5 text-ink-2">
+                          {`${snippet.gutter} │ ${snippet.code}\n${' '.repeat(snippet.gutter.length)} │ `}
+                          <span className={tone.text}>{snippet.pointer}</span>
+                        </pre>
+                        {(fixes.length > 0 || canAccept || canIgnore) && (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {fixes.map((fix, fixIndex) => (
+                              <button
+                                key={`${fix.kind}:${fix.value}`}
+                                type="button"
+                                onClick={() => editorHandleRef.current?.applyFix(alert.id, fixIndex)}
+                                className="min-h-9 border border-accent px-2.5 text-xs font-semibold text-accent hover:bg-accent hover:text-on-accent lg:min-h-0 lg:py-1"
+                              >
+                                {describeFix(fix, t)}
+                              </button>
+                            ))}
+                            {canAccept && (
+                              <button
+                                type="button"
+                                onClick={() => acceptTerm(alert.id)}
+                                className="min-h-9 border border-accent px-2.5 text-xs font-semibold text-accent hover:bg-accent hover:text-on-accent lg:min-h-0 lg:py-1"
+                              >
+                                {t('vocab.acceptTerm', { term: alert.Match })}
+                              </button>
+                            )}
+                            {canIgnore && (
+                              <label className="flex items-center gap-1.5 text-xs font-semibold text-ink-2">
+                                <span>{t('severity.field')}</span>
+                                <select
+                                  data-action="severity"
+                                  aria-label={t('severity.change', { rule: alert.Check })}
+                                  value={isRuleSeverity(severity) ? severity : 'suggestion'}
+                                  onChange={(e) => {
+                                    if (isRuleSeverity(e.target.value)) changeSeverity(alert.Check, e.target.value);
+                                  }}
+                                  className="min-h-9 cursor-pointer border border-rule bg-paper px-1.5 text-base font-semibold text-ink lg:min-h-0 lg:py-0.5 lg:text-xs"
+                                >
+                                  {RULE_SEVERITIES.map((option) => (
+                                    <option key={option} value={option}>{getSeverityLabel(option, t)}</option>
+                                  ))}
+                                </select>
+                              </label>
+                            )}
+                            {canIgnore && (
+                              <button
+                                type="button"
+                                data-action="ignore-rule"
+                                aria-label={t('ignore.buttonLabel', { rule: alert.Check })}
+                                onClick={() => ignoreRule(alert.Check)}
+                                className="min-h-9 border border-rule px-2.5 text-xs font-semibold text-ink-2 hover:border-ink-2 hover:text-ink lg:min-h-0 lg:py-1"
+                              >
+                                {t('ignore.button')}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        {href && (
+                          <a
+                            href={href}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="mt-1.5 inline-flex items-center gap-1 py-1 text-xs font-medium text-accent underline underline-offset-2"
+                            aria-label={t('alerts.styleGuideLabel', { rule: alert.Check })}
+                          >
+                            {t('alerts.styleGuide')} <ExternalLink className="h-3 w-3" />
                           </a>
                         )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                      </li>
+                    );
+                  })}
+                </ol>
               )}
             </div>
           </section>
         </div>
+
+        {/* Phone navigation: the three panels as tabs, within thumb reach */}
+        <div
+          role="tablist"
+          aria-label={t('editor.panels')}
+          onKeyDown={(e) => handleTabKeys(e, TAB_ORDER_MOBILE)}
+          className="flex shrink-0 border-t border-rule bg-sheet pb-[env(safe-area-inset-bottom)] lg:hidden"
+        >
+          <TabButton mode="editor" scope="mobile" selected={view === 'editor'} onSelect={setView} className={mobileTabClass(view === 'editor')}>{t('editor.editor')}</TabButton>
+          <TabButton mode="preview" scope="mobile" selected={view === 'preview'} onSelect={setView} className={mobileTabClass(view === 'preview')}>{t('editor.preview')}</TabButton>
+          <TabButton mode="alerts" scope="mobile" selected={view === 'alerts'} onSelect={setView} className={mobileTabClass(view === 'alerts')}>
+            {t('editor.alerts')}
+            {visibleAlerts.length > 0 && (
+              <span className={`font-mono text-xs ${isStale ? 'text-warn' : 'text-ink-2'}`}>{visibleAlerts.length}</span>
+            )}
+          </TabButton>
+        </div>
       </main>
 
-      <style jsx global>{`
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 4px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: #e2e8f0;
-          border-radius: 10px;
-        }
-        .dark .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: #334155;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: #cbd5e1;
-        }
-        .dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: #475569;
-        }
-        textarea::selection {
-          background-color: rgba(250, 204, 21, 0.4);
-          color: inherit;
-        }
-        .dark textarea::selection {
-          background-color: rgba(250, 204, 21, 0.5);
-        }
-      `}</style>
+      <VocabularyDialog open={vocabularyOpen} onClose={() => setVocabularyOpen(false)} vocabulary={vocabulary} onChange={setVocabulary} />
     </div>
   );
 }
