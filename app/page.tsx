@@ -1,24 +1,15 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, useSyncExternalStore } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, useSyncExternalStore } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useTheme } from 'next-themes';
 import { Sun, Moon, Upload, Copy, Check, Trash2, Settings, PlayCircle, ExternalLink, FileText, FileSearch, LoaderCircle, TriangleAlert, X } from 'lucide-react';
 
-interface ValeAlert {
-  Action: {
-    Name: string;
-    Params: string[] | null;
-  };
-  Span: [number, number];
-  Check: string;
-  Description: string;
-  Link: string;
-  Message: string;
-  Severity: string;
-  Match: string;
-  Line: number;
-}
+import { LintEditor } from '@/components/lint-editor';
+import type { LintEditorHandle } from '@/components/lint-editor';
+import type { AlertPosition, ReviewAlert, ValeAlert } from '@/types/lint';
+import { getFixes } from '@/lib/vale-fixes';
+import { safeHttpUrl } from '@/lib/safe-url';
 
 interface CustomRule {
   name: string;
@@ -164,7 +155,11 @@ export default function Home() {
   const [text, setText] = useState('');
   const [style, setStyle] = useState('Google');
   const [customRules, setCustomRules] = useState<CustomRule[]>([]);
-  const [results, setResults] = useState<ValeAlert[]>([]);
+  const [results, setResults] = useState<ReviewAlert[]>([]);
+  // Alerts fixed with one click: hidden from the list until the next review
+  const [resolvedIds, setResolvedIds] = useState<ReadonlySet<number>>(() => new Set());
+  // Where each alert is in the document now. The editor keeps these up to date while the user types.
+  const [positions, setPositions] = useState<Map<number, AlertPosition>>(() => new Map());
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   // null = the user has not chosen yet: open on desktop, closed (a drawer) on mobile
@@ -180,8 +175,8 @@ export default function Home() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
-  const editorRef = useRef<HTMLTextAreaElement>(null);
-  const pendingRevealRef = useRef<ValeAlert | null>(null);
+  const editorHandleRef = useRef<LintEditorHandle>(null);
+  const pendingRevealRef = useRef<number | null>(null);
 
   const handleLint = useCallback(async (): Promise<void> => {
     if (loading) return;
@@ -198,6 +193,8 @@ export default function Home() {
 
     setLoading(true);
     setResults([]);
+    setResolvedIds(new Set());
+    setPositions(new Map());
     setSnapshot(null);
     try {
       const response = await fetch('/api/lint', {
@@ -207,7 +204,7 @@ export default function Home() {
       });
       const data = await response.json();
       if (response.ok && Array.isArray(data)) {
-        setResults(data as ValeAlert[]);
+        setResults((data as ValeAlert[]).map((alert, id) => ({ ...alert, id })));
         setSnapshot({ text: normalizedText, style, rulesKey: getRulesKey(customRules), at: new Date() });
         // On a phone the results are on another tab: take the user there
         if (!window.matchMedia(DESKTOP_QUERY).matches) setView('alerts');
@@ -288,86 +285,44 @@ export default function Home() {
     if (text && confirm('Are you sure you want to clear the editor?')) {
       setText('');
       setResults([]);
+      setResolvedIds(new Set());
       setSnapshot(null);
     }
   };
 
-  const revealAlert = (alert: ValeAlert): void => {
-    if (!editorRef.current) return;
-
-    const textarea = editorRef.current;
-    // Use the actual textarea value which has normalized newlines
-    const currentValue = textarea.value;
-    const lines = currentValue.split('\n');
-    let offset = 0;
-
-    // Calculate offset based on current textarea value
-    for (let i = 0; i < Math.min(alert.Line - 1, lines.length); i++) {
-      offset += lines[i].length + 1; // +1 for \n
-    }
-
-    const start = offset + alert.Span[0] - 1;
-    const end = offset + alert.Span[1];
-
-    // Use a shadow textarea to calculate the scroll position accurately (handles wrapping)
-    const shadow = document.createElement('textarea');
-    const style = window.getComputedStyle(textarea);
-    const props = [
-      'width', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
-      'font-size', 'font-family', 'line-height', 'box-sizing',
-      'word-wrap', 'white-space', 'letter-spacing', 'text-transform',
-      'text-align', 'text-indent', 'overflow-wrap'
-    ];
-
-    // Copy styles to shadow textarea
-    props.forEach(prop => {
-      shadow.style.setProperty(prop, style.getPropertyValue(prop));
-    });
-
-    shadow.style.position = 'absolute';
-    shadow.style.visibility = 'hidden';
-    shadow.style.height = '0';
-    shadow.style.overflow = 'hidden';
-
-    // Measure height up to the end of the selection
-    shadow.value = currentValue.substring(0, end);
-    document.body.appendChild(shadow);
-    const selectionBottom = shadow.scrollHeight;
-    document.body.removeChild(shadow);
-
-    // Center the selection
-    const scrollTo = selectionBottom - (textarea.clientHeight / 2);
-    textarea.scrollTop = Math.max(0, scrollTo);
-
-    textarea.focus();
-    // Setting selection range after focus and scroll for better compatibility
-    textarea.setSelectionRange(start, end);
+  // On a phone the keyboard stays closed: the selection is shown without focusing the editor
+  const revealAlert = (id: number): void => {
+    editorHandleRef.current?.reveal(id, { focus: isDesktop });
   };
 
-  const handleAlertClick = (alert: ValeAlert, e: React.MouseEvent) => {
-    // Prevent the click from being handled by parent elements if we clicked a link
-    if ((e.target as HTMLElement).closest('a')) return;
+  const handleAlertClick = (alert: ReviewAlert, e: React.MouseEvent) => {
+    // Prevent the click from being handled by parent elements if we clicked a link or a button
+    if ((e.target as HTMLElement).closest('a, button')) return;
 
     e.preventDefault();
     e.stopPropagation();
 
     if (view === 'editor') {
-      revealAlert(alert);
+      revealAlert(alert.id);
     } else {
       // The editor is hidden (preview or alerts tab): show it first, then select the text
-      pendingRevealRef.current = alert;
+      pendingRevealRef.current = alert.id;
       setView('editor');
     }
   };
 
-  // Runs once the editor is visible again, because hidden elements cannot be measured or focused
+  // Runs once the editor is visible again, because a hidden editor cannot scroll to the text
   useEffect(() => {
-    if (view === 'editor' && pendingRevealRef.current) {
-      const alert = pendingRevealRef.current;
+    if (view === 'editor' && pendingRevealRef.current !== null) {
+      const id = pendingRevealRef.current;
       pendingRevealRef.current = null;
-      revealAlert(alert);
+      revealAlert(id);
     }
   });
+
+  const markResolved = useCallback((id: number): void => {
+    setResolvedIds((previous) => new Set(previous).add(id));
+  }, []);
 
   const handleTabKeys = (event: React.KeyboardEvent<HTMLElement>, order: ViewMode[]): void => {
     const current = order.indexOf(view);
@@ -391,11 +346,28 @@ export default function Home() {
     (snapshot.text !== normalizedText || snapshot.style !== style || snapshot.rulesKey !== getRulesKey(customRules));
   const textChanged = snapshot !== null && snapshot.text !== normalizedText;
   const styleLabel = STYLE_OPTIONS.find((option) => option.value === style)?.label ?? style;
-  const reviewedLines = snapshot ? snapshot.text.split('\n') : [];
-  const currentLines = normalizedText.split('\n');
-  // An alert is out of date when the line it points at is no longer the line that was reviewed
-  const isAlertStale = (alert: ValeAlert): boolean =>
-    textChanged && reviewedLines[alert.Line - 1] !== currentLines[alert.Line - 1];
+  const visibleAlerts = useMemo(() => results.filter((alert) => !resolvedIds.has(alert.id)), [results, resolvedIds]);
+  const currentLines = useMemo(() => normalizedText.split('\n'), [normalizedText]);
+  const reviewedLines = useMemo(() => (snapshot ? snapshot.text.split('\n') : []), [snapshot]);
+  const lineStarts = useMemo(() => {
+    const starts = [0];
+    for (let i = 0; i < normalizedText.length; i += 1) {
+      if (normalizedText.charCodeAt(i) === 10) starts.push(i + 1);
+    }
+    return starts;
+  }, [normalizedText]);
+
+  /** Line and column (both 1-based) of a document offset, by binary search over the line starts. */
+  const locate = (offset: number): { line: number; column: number } => {
+    let low = 0;
+    let high = lineStarts.length - 1;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (lineStarts[middle] <= offset) low = middle;
+      else high = middle - 1;
+    }
+    return { line: low + 1, column: offset - lineStarts[low] + 1 };
+  };
 
   const reviewTime = snapshot ? snapshot.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
   // Replaces the old "Live Editor" badge: the status always reflects the real state of the text
@@ -424,8 +396,8 @@ export default function Home() {
       return (
         <PanelMessage
           icon={<FileSearch className="w-4 h-4 text-ink-2" />}
-          title="The last review found no alerts"
-          detail="The document changed since then, so this result no longer applies."
+          title="No open alerts"
+          detail="The document changed after the last review. Run Linting again to confirm."
         />
       );
     }
@@ -440,7 +412,7 @@ export default function Home() {
   };
 
   const staleMessage = textChanged
-    ? 'The text changed after the last review. Alerts on edited lines are marked. Press Run Linting (Ctrl+Enter) to refresh.'
+    ? 'The text changed after the last review. Alerts follow your edits, and the ones you edited are marked. Press Run Linting (Ctrl+Enter) to refresh.'
     : 'The style guide or custom rules changed after the last review. Press Run Linting (Ctrl+Enter) to refresh.';
 
   const secondaryButton =
@@ -650,13 +622,18 @@ export default function Home() {
             </div>
 
             <div id="panel-editor" role="tabpanel" aria-label="Editor" className={`${view === 'preview' ? 'hidden' : 'flex'} min-h-0 flex-1 flex-col`}>
-              <textarea
-                ref={editorRef}
+              <LintEditor
+                ref={editorHandleRef}
+                // 16 px on phones: smaller text makes iOS zoom the page when the editor is focused
+                className="min-h-0 flex-1 overflow-hidden text-base lg:text-[14.5px]"
                 value={text}
-                onChange={(e) => setText(e.target.value)}
-                aria-label="Document text"
-                className="custom-scrollbar flex-1 resize-none bg-transparent p-4 font-mono text-base leading-7 text-ink placeholder:text-ink-2 focus-visible:outline-offset-[-2px] lg:p-6 lg:text-[14.5px]"
-                placeholder="Start typing your documentation (Markdown supported)..."
+                onChange={setText}
+                alerts={results}
+                reviewedText={snapshot?.text ?? null}
+                onPositionsChange={setPositions}
+                onFixApplied={markResolved}
+                placeholderText="Start typing your documentation (Markdown supported)..."
+                ariaLabel="Document text"
               />
             </div>
 
@@ -673,8 +650,8 @@ export default function Home() {
             <div className="flex h-10 shrink-0 items-center justify-between border-b border-rule px-4">
               <div className="flex items-baseline gap-2">
                 <ColumnLabel>Alerts</ColumnLabel>
-                {results.length > 0 && (
-                  <span className="font-mono text-xs font-semibold text-ink">{results.length}</span>
+                {visibleAlerts.length > 0 && (
+                  <span className="font-mono text-xs font-semibold text-ink">{visibleAlerts.length}</span>
                 )}
               </div>
               {results.length > 0 && (
@@ -689,17 +666,29 @@ export default function Home() {
                   <span>{staleMessage}</span>
                 </div>
               )}
-              {results.length === 0 ? (
+              {visibleAlerts.length === 0 ? (
                 renderEmptyState()
               ) : (
                 <ol>
-                  {results.map((alert, index) => {
-                    const stale = isAlertStale(alert);
+                  {visibleAlerts.map((alert) => {
+                    // The editor reports where the alert is now; no position means its text was edited
+                    const live = positions.get(alert.id);
+                    const stale = textChanged && !live;
                     const tone = getSeverityTone(alert.Severity);
-                    const snippet = buildSnippet(reviewedLines[alert.Line - 1] ?? '', alert.Span, alert.Line);
+                    let line = alert.Line;
+                    let span: [number, number] = alert.Span;
+                    if (live) {
+                      const start = locate(live.from);
+                      const end = locate(Math.max(live.from, live.to - 1));
+                      line = start.line;
+                      span = [start.column, end.column];
+                    }
+                    const snippet = buildSnippet((live ? currentLines : reviewedLines)[line - 1] ?? '', span, line);
+                    const fixes = stale ? [] : getFixes(alert.Action);
+                    const href = safeHttpUrl(alert.Link);
                     return (
                       <li
-                        key={index}
+                        key={alert.id}
                         data-testid="alert-card"
                         data-severity={alert.Severity}
                         onClick={stale ? undefined : (e) => handleAlertClick(alert, e)}
@@ -711,7 +700,7 @@ export default function Home() {
                           </span>
                           <span className="min-w-0 truncate font-mono text-ink-2">{alert.Check}</span>
                           <span className="ml-auto shrink-0 font-mono text-ink-2">
-                            {stale ? 'line changed' : `L${alert.Line}:${alert.Span[0]}`}
+                            {stale ? 'text edited' : `L${line}:${span[0]}`}
                           </span>
                         </div>
                         <p className={`mt-1.5 text-sm leading-snug text-ink ${stale ? 'italic' : ''}`}>{alert.Message}</p>
@@ -719,9 +708,23 @@ export default function Home() {
                           {`${snippet.gutter} │ ${snippet.code}\n${' '.repeat(snippet.gutter.length)} │ `}
                           <span className={tone.text}>{snippet.pointer}</span>
                         </pre>
-                        {alert.Link && (
+                        {fixes.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {fixes.map((fix, fixIndex) => (
+                              <button
+                                key={fix.label}
+                                type="button"
+                                onClick={() => editorHandleRef.current?.applyFix(alert.id, fixIndex)}
+                                className="min-h-9 border border-accent px-2.5 text-xs font-semibold text-accent hover:bg-accent hover:text-on-accent lg:min-h-0 lg:py-1"
+                              >
+                                {fix.label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        {href && (
                           <a
-                            href={alert.Link}
+                            href={href}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="mt-1.5 inline-flex items-center gap-1 py-1 text-xs font-medium text-accent underline underline-offset-2"
@@ -750,8 +753,8 @@ export default function Home() {
           <TabButton mode="preview" scope="mobile" selected={view === 'preview'} onSelect={setView} className={mobileTabClass(view === 'preview')}>Preview</TabButton>
           <TabButton mode="alerts" scope="mobile" selected={view === 'alerts'} onSelect={setView} className={mobileTabClass(view === 'alerts')}>
             Alerts
-            {results.length > 0 && (
-              <span className={`font-mono text-xs ${isStale ? 'text-warn' : 'text-ink-2'}`}>{results.length}</span>
+            {visibleAlerts.length > 0 && (
+              <span className={`font-mono text-xs ${isStale ? 'text-warn' : 'text-ink-2'}`}>{visibleAlerts.length}</span>
             )}
           </TabButton>
         </div>

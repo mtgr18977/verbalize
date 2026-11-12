@@ -33,6 +33,14 @@ verbalize/
 │   │       └── route.ts          # Core API endpoint for Vale integration
 │   ├── layout.tsx                # Root layout component
 │   └── page.tsx                  # Main application interface
+├── components/
+│   └── lint-editor.tsx           # CodeMirror 6 editor with Vale diagnostics
+├── lib/
+│   ├── lint-guards.ts            # Limits and request guards for /api/lint
+│   ├── vale-fixes.ts             # One-click fixes derived from Vale's `Action`
+│   └── safe-url.ts               # Only http(s) links reach an href
+├── types/
+│   └── lint.ts                   # Vale alert types shared by the UI and the editor
 ├── styles/
 │   ├── Google/                   # Google Developer Documentation Style Guide
 │   ├── Microsoft/                # Microsoft Writing Style Guide
@@ -293,6 +301,16 @@ npx playwright show-report
 - Fonts are Atkinson Hyperlegible Next (interface) and Atkinson Hyperlegible Mono (editor), loaded in `app/layout.tsx` with variables on `<html>`.
 - Layout: below the `lg` breakpoint (1024 px) the app is a single column with a bottom tab bar (Editor, Preview, Alerts) and the settings are a drawer; from `lg` up the editor sits beside the alerts and Preview is a tab of the left pane. Use `h-dvh`, keep touch targets at 36 px or more on phones, and keep form fields at 16 px on phones so iOS does not zoom.
 - Alerts render as compiler-style diagnostics: severity, rule, position, the offending line and a `^^^` pointer. Tests find them with `data-testid="alert-card"`.
+
+### Editor (CodeMirror 6)
+
+- The editor is `components/lint-editor.tsx`. It is themed only with the CSS variables of the theme, so it follows light and dark mode without being reconfigured.
+- Alerts are CodeMirror diagnostics. `LintEditor` receives `alerts` (give it a new array only when there is a new review) and `reviewedText`; underlines are drawn only while the document still equals the reviewed text. After that the editor maps each alert through the user's edits and reports where it is now (`onPositionsChange`). An alert whose own text was edited is dropped, and the panel shows it as "text edited".
+- One-click fixes come from Vale's `Action` (`replace`, `remove`, `edit` with `trim_*` or `regex`); see `lib/vale-fixes.ts`. Fixes appear in the hover tooltip and in the alert card, and both go through the same code.
+- Ctrl/Cmd+Enter is removed from CodeMirror's keymap on purpose: the page uses it to run the review. F8 and Shift+F8 move between alerts.
+- Markdown support is built on `@lezer/markdown` directly. Do not add `@codemirror/lang-markdown`: it adds about 87 KB (gzip) of embedded HTML, CSS and JavaScript highlighting that a prose editor does not use.
+- Browser spellcheck is off, because its red squiggles would collide with the linter's underlines.
+- Tests: use `tests/helpers/editor.ts` (`editor`, `setText`, `docText`, `review`). The editor mounts after hydration, so wait for it before reading its styles.
 
 ### Design Constraints
 

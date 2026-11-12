@@ -1,5 +1,6 @@
 
 import { test, expect } from '@playwright/test';
+import { setText } from './helpers/editor';
 
 interface ValeAlert {
   Action: {
@@ -42,8 +43,7 @@ test.describe('Writer Assistant', () => {
   });
 
   test('should perform basic linting', async ({ page }) => {
-    const editor = page.locator('textarea');
-    await editor.fill('We use this in order to test the linting.');
+    await setText(page, 'We use this in order to test the linting.');
 
     // Match by role: the panel hint also mentions "Run Linting", so a text match is ambiguous
     const lintButton = page.getByRole('button', { name: /Run Linting/ });

@@ -1,0 +1,392 @@
+'use client';
+
+import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
+import { EditorSelection, EditorState } from '@codemirror/state';
+import {
+  EditorView,
+  drawSelection,
+  highlightActiveLine,
+  highlightActiveLineGutter,
+  keymap,
+  lineNumbers,
+  placeholder,
+} from '@codemirror/view';
+import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import { HighlightStyle, Language, LanguageSupport, defineLanguageFacet, syntaxHighlighting } from '@codemirror/language';
+import { forEachDiagnostic, nextDiagnostic, previousDiagnostic, setDiagnostics } from '@codemirror/lint';
+import type { Action, Diagnostic } from '@codemirror/lint';
+import { tags } from '@lezer/highlight';
+import { GFM, parser as markdownParser } from '@lezer/markdown';
+
+import type { AlertPosition, ReviewAlert } from '@/types/lint';
+import { getFixes } from '@/lib/vale-fixes';
+import type { Fix } from '@/lib/vale-fixes';
+import { safeHttpUrl } from '@/lib/safe-url';
+
+export interface LintEditorHandle {
+  /** Selects the alert's text and scrolls it to the middle of the editor. */
+  reveal: (id: number, options?: { focus?: boolean }) => void;
+  /** Applies the `fixIndex`-th correction of an alert, if it is still in the document. */
+  applyFix: (id: number, fixIndex: number) => void;
+}
+
+interface LintEditorProps {
+  value: string;
+  onChange: (text: string) => void;
+  /** Alerts of the last review. Pass a new array only when there is a new review. */
+  alerts: ReviewAlert[];
+  /** The exact text that was reviewed. Underlines are shown only while the document still matches it. */
+  reviewedText: string | null;
+  /** Called with the current position of every alert still underlined, after each edit. */
+  onPositionsChange: (positions: Map<number, AlertPosition>) => void;
+  onFixApplied: (id: number) => void;
+  placeholderText: string;
+  ariaLabel: string;
+  className?: string;
+}
+
+interface Callbacks {
+  onChange: (text: string) => void;
+  onPositionsChange: (positions: Map<number, AlertPosition>) => void;
+  onFixApplied: (id: number) => void;
+}
+
+/**
+ * The editor is themed only with the CSS variables of the Diagnóstico theme (see globals.css),
+ * so it follows light and dark mode without being reconfigured.
+ */
+const theme = EditorView.theme({
+  '&': { height: '100%', backgroundColor: 'transparent', color: 'var(--ink)' },
+  '&.cm-focused': { outline: '2px solid var(--accent)', outlineOffset: '-2px' },
+  '.cm-scroller': {
+    fontFamily: 'var(--font-editor), ui-monospace, monospace',
+    lineHeight: '1.75',
+    overflow: 'auto',
+  },
+  '.cm-content': { padding: '1rem 0', caretColor: 'var(--ink)' },
+  '.cm-line': { padding: '0 1rem' },
+  '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--ink)', borderLeftWidth: '2px' },
+  // The selection stays visible when the editor is not focused: tapping an alert on a phone
+  // selects the text without opening the keyboard.
+  '.cm-selectionBackground, &.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': {
+    background: 'var(--select)',
+  },
+  '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--select) 35%, transparent)' },
+  '.cm-gutters': {
+    backgroundColor: 'transparent',
+    color: 'var(--ink-2)',
+    border: 'none',
+    borderRight: '1px solid var(--rule)',
+  },
+  '.cm-lineNumbers .cm-gutterElement': { padding: '0 0.6rem 0 0.9rem', minWidth: '2.4rem', fontSize: '0.82em' },
+  '.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--ink)' },
+  '.cm-placeholder': { color: 'var(--ink-2)' },
+
+  // Severity is told by the shape of the underline, not only by color
+  '.cm-lintRange': { backgroundImage: 'none', paddingBottom: '0', textUnderlineOffset: '4px' },
+  '.cm-lintRange-error': { textDecoration: 'underline wavy var(--err) 1.5px' },
+  '.cm-lintRange-warning': { textDecoration: 'underline dashed var(--warn) 1.5px' },
+  '.cm-lintRange-info': { textDecoration: 'underline dotted var(--ink-2) 1.5px' },
+  '.cm-lintRange-active': { backgroundColor: 'var(--select)' },
+
+  '.cm-tooltip': {
+    border: '1px solid var(--ink-2)',
+    borderRadius: '2px',
+    backgroundColor: 'var(--sheet)',
+    color: 'var(--ink)',
+    fontFamily: 'var(--font-ui), system-ui, sans-serif',
+    fontSize: '14px',
+    boxShadow: 'none',
+  },
+  '.cm-tooltip.cm-tooltip-lint': { maxWidth: '26rem' },
+  '.cm-diagnostic': { padding: '8px 12px', marginLeft: '0', borderLeft: '3px solid var(--ink-2)' },
+  '.cm-diagnostic-error': { borderLeftColor: 'var(--err)' },
+  '.cm-diagnostic-warning': { borderLeftColor: 'var(--warn)' },
+  '.cm-diagnostic-info': { borderLeftColor: 'var(--ink-2)' },
+  '.cm-diagnosticSource': {
+    display: 'block',
+    marginBottom: '2px',
+    color: 'var(--ink-2)',
+    fontFamily: 'var(--font-editor), ui-monospace, monospace',
+    fontSize: '12px',
+    opacity: '1',
+  },
+  '.cm-diagnosticText': { display: 'block' },
+  '.cm-diagnosticAction': {
+    marginLeft: '0',
+    marginRight: '12px',
+    marginTop: '6px',
+    padding: '0',
+    backgroundColor: 'transparent',
+    color: 'var(--accent)',
+    fontWeight: '600',
+    textDecoration: 'underline',
+    textUnderlineOffset: '3px',
+    cursor: 'pointer',
+  },
+  '.cm-diagnosticLink': { color: 'var(--accent)', textDecoration: 'underline', fontSize: '12px' },
+});
+
+/*
+ * Markdown support built straight on the Lezer parser. @codemirror/lang-markdown would add about
+ * 87 KB (gzip) for embedded HTML, CSS and JavaScript highlighting that a prose editor never uses.
+ */
+const markdownSupport = new LanguageSupport(
+  new Language(defineLanguageFacet(), markdownParser.configure(GFM), [], 'markdown')
+);
+
+const markdownHighlight = HighlightStyle.define([
+  { tag: tags.heading, fontWeight: '700', color: 'var(--ink)' },
+  { tag: tags.strong, fontWeight: '700' },
+  { tag: tags.emphasis, fontStyle: 'italic' },
+  { tag: tags.strikethrough, textDecoration: 'line-through' },
+  { tag: [tags.link, tags.url], color: 'var(--accent)' },
+  { tag: tags.monospace, color: 'var(--ink)', backgroundColor: 'var(--paper)' },
+  { tag: tags.quote, color: 'var(--ink-2)' },
+  { tag: [tags.processingInstruction, tags.contentSeparator, tags.meta], color: 'var(--ink-2)' },
+]);
+
+function getSeverity(severity: string): Diagnostic['severity'] {
+  if (severity === 'error') return 'error';
+  if (severity === 'warning') return 'warning';
+  return 'info';
+}
+
+function samePositions(a: Map<number, AlertPosition>, b: Map<number, AlertPosition>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [id, position] of a) {
+    const other = b.get(id);
+    if (!other || other.from !== position.from || other.to !== position.to) return false;
+  }
+  return true;
+}
+
+/** Applies a fix to [from, to]. Removing a word between two spaces also removes one of them. */
+function runFix(view: EditorView, from: number, to: number, fix: Fix): void {
+  const replacement = fix.apply(view.state.doc.sliceString(from, to));
+  let start = from;
+  if (replacement === '') {
+    const before = start > 0 ? view.state.doc.sliceString(start - 1, start) : '';
+    const after = view.state.doc.sliceString(to, to + 1);
+    if (before === ' ' && (after === ' ' || after === '')) start -= 1;
+  }
+  view.dispatch({ changes: { from: start, to, insert: replacement }, userEvent: 'input.complete' });
+}
+
+export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function LintEditor(
+  { value, onChange, alerts, reviewedText, onPositionsChange, onFixApplied, placeholderText, ariaLabel, className },
+  ref
+) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<EditorView | null>(null);
+  const callbacksRef = useRef<Callbacks>({ onChange, onPositionsChange, onFixApplied });
+  const lastEmittedRef = useRef(value);
+  const lastPositionsRef = useRef<Map<number, AlertPosition>>(new Map());
+  // Diagnostic objects keep their original positions; this ties each one to its alert id
+  const alertIdsRef = useRef(new WeakMap<Diagnostic, number>());
+
+  useEffect(() => {
+    callbacksRef.current = { onChange, onPositionsChange, onFixApplied };
+  });
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+
+    const reportPositions = (view: EditorView): void => {
+      const next = new Map<number, AlertPosition>();
+      forEachDiagnostic(view.state, (diagnostic, from, to) => {
+        const id = alertIdsRef.current.get(diagnostic);
+        if (id !== undefined) next.set(id, { from, to });
+      });
+      if (!samePositions(lastPositionsRef.current, next)) {
+        lastPositionsRef.current = next;
+        callbacksRef.current.onPositionsChange(next);
+      }
+    };
+
+    // An alert whose text was edited no longer says anything reliable: stop underlining it
+    const dropEdited = (view: EditorView, edited: Array<[number, number]>): void => {
+      const kept: Diagnostic[] = [];
+      let dropped = false;
+      forEachDiagnostic(view.state, (diagnostic, from, to) => {
+        const touched = from === to || edited.some(([start, end]) => from < end && to > start);
+        if (touched) {
+          dropped = true;
+          return;
+        }
+        if (from === diagnostic.from && to === diagnostic.to) {
+          kept.push(diagnostic);
+        } else {
+          const moved: Diagnostic = { ...diagnostic, from, to };
+          const id = alertIdsRef.current.get(diagnostic);
+          if (id !== undefined) alertIdsRef.current.set(moved, id);
+          kept.push(moved);
+        }
+      });
+      if (dropped) view.dispatch(setDiagnostics(view.state, kept));
+      reportPositions(view);
+    };
+
+    const view = new EditorView({
+      parent: host,
+      state: EditorState.create({
+        doc: value,
+        extensions: [
+          history(),
+          drawSelection(),
+          lineNumbers(),
+          highlightActiveLine(),
+          highlightActiveLineGutter(),
+          EditorView.lineWrapping,
+          markdownSupport,
+          syntaxHighlighting(markdownHighlight),
+          placeholder(placeholderText),
+          theme,
+          keymap.of([
+            // Ctrl/Cmd+Enter runs the review (handled by the page), not "insert blank line"
+            ...defaultKeymap.filter((binding) => binding.key !== 'Mod-Enter'),
+            ...historyKeymap,
+            { key: 'F8', run: nextDiagnostic },
+            { key: 'Shift-F8', run: previousDiagnostic },
+          ]),
+          EditorView.contentAttributes.of({
+            'aria-label': ariaLabel,
+            'aria-multiline': 'true',
+            // Browser spellcheck would draw its own red squiggles over the linter's underlines
+            spellcheck: 'false',
+            autocorrect: 'off',
+            autocapitalize: 'off',
+          }),
+          EditorView.updateListener.of((update) => {
+            if (!update.docChanged) return;
+            const text = update.state.doc.toString();
+            lastEmittedRef.current = text;
+            callbacksRef.current.onChange(text);
+
+            const edited: Array<[number, number]> = [];
+            update.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => edited.push([fromB, toB]));
+            // Diagnostics cannot be changed while an update is in progress
+            queueMicrotask(() => {
+              if (viewRef.current === update.view) dropEdited(update.view, edited);
+            });
+          }),
+        ],
+      }),
+    });
+    viewRef.current = view;
+
+    return () => {
+      view.destroy();
+      viewRef.current = null;
+    };
+    // The view is created once; later changes to props are synchronized by the effects below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Text changed from outside (file upload, "clear editor"): replace the document
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || value === lastEmittedRef.current) return;
+    lastEmittedRef.current = value;
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } });
+  }, [value]);
+
+  // A new review arrived: underline its alerts, but only if the document is still the reviewed one
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+
+    const diagnostics: Diagnostic[] = [];
+    if (reviewedText !== null && view.state.doc.toString() === reviewedText) {
+      const doc = view.state.doc;
+      for (const alert of alerts) {
+        if (alert.Line < 1 || alert.Line > doc.lines) continue;
+        const line = doc.line(alert.Line);
+        const from = Math.min(line.to, line.from + alert.Span[0] - 1);
+        const to = Math.min(line.to, line.from + alert.Span[1]);
+        if (to <= from) continue;
+
+        const fixes = getFixes(alert.Action);
+        const actions: Action[] = fixes.map((fix) => ({
+          name: fix.label,
+          apply: (actionView, actionFrom, actionTo) => {
+            runFix(actionView, actionFrom, actionTo, fix);
+            callbacksRef.current.onFixApplied(alert.id);
+          },
+        }));
+        const href = safeHttpUrl(alert.Link);
+
+        const diagnostic: Diagnostic = {
+          from,
+          to,
+          severity: getSeverity(alert.Severity),
+          source: alert.Check,
+          message: alert.Message,
+          actions,
+          renderMessage: () => {
+            const wrapper = document.createElement('span');
+            const message = document.createElement('span');
+            message.textContent = alert.Message;
+            wrapper.appendChild(message);
+            if (href) {
+              const link = document.createElement('a');
+              link.href = href;
+              link.target = '_blank';
+              link.rel = 'noopener noreferrer';
+              link.className = 'cm-diagnosticLink';
+              link.textContent = ' Style guide';
+              wrapper.appendChild(link);
+            }
+            return wrapper;
+          },
+        };
+        alertIdsRef.current.set(diagnostic, alert.id);
+        diagnostics.push(diagnostic);
+      }
+    }
+
+    view.dispatch(setDiagnostics(view.state, diagnostics));
+
+    const positions = new Map<number, AlertPosition>();
+    forEachDiagnostic(view.state, (diagnostic, from, to) => {
+      const id = alertIdsRef.current.get(diagnostic);
+      if (id !== undefined) positions.set(id, { from, to });
+    });
+    lastPositionsRef.current = positions;
+    callbacksRef.current.onPositionsChange(positions);
+  }, [alerts, reviewedText]);
+
+  useImperativeHandle(ref, () => {
+    const find = (id: number): { diagnostic: Diagnostic; from: number; to: number } | null => {
+      const view = viewRef.current;
+      if (!view) return null;
+      let found: { diagnostic: Diagnostic; from: number; to: number } | null = null;
+      forEachDiagnostic(view.state, (diagnostic, from, to) => {
+        if (alertIdsRef.current.get(diagnostic) === id) found = { diagnostic, from, to };
+      });
+      return found;
+    };
+
+    return {
+      reveal: (id, options) => {
+        const view = viewRef.current;
+        const target = find(id);
+        if (!view || !target) return;
+        view.dispatch({
+          selection: EditorSelection.single(target.from, target.to),
+          effects: EditorView.scrollIntoView(EditorSelection.range(target.from, target.to), { y: 'center' }),
+        });
+        if (options?.focus !== false) view.focus();
+      },
+      applyFix: (id, fixIndex) => {
+        const view = viewRef.current;
+        const target = find(id);
+        const action = target?.diagnostic.actions?.[fixIndex];
+        if (view && target && action) action.apply(view, target.from, target.to);
+      },
+    };
+  }, []);
+
+  return <div ref={hostRef} data-testid="editor" className={className} />;
+});

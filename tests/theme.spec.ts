@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
+import { editor, setText } from './helpers/editor';
 
 const WITH_ALERTS = 'We really use this in order to test it.\nThe file was deleted by the user.';
 
@@ -41,16 +42,16 @@ test.describe('Diagnóstico theme', () => {
 
   test('status text follows the real state of the review', async ({ page }) => {
     await page.goto('/');
-    await page.locator('textarea').fill(WITH_ALERTS);
+    await setText(page, WITH_ALERTS);
     await page.keyboard.press('Control+Enter');
     await expect(page.getByTestId('review-status')).toHaveText(/^Reviewed at/);
-    await page.locator('textarea').fill(WITH_ALERTS + ' Edited.');
+    await setText(page, WITH_ALERTS + ' Edited.');
     await expect(page.getByTestId('review-status')).toHaveText('Out of date');
   });
 
   test('alerts read like compiler diagnostics: rule, position, excerpt and pointer', async ({ page }) => {
     await page.goto('/');
-    await page.locator('textarea').fill(WITH_ALERTS);
+    await setText(page, WITH_ALERTS);
     await page.keyboard.press('Control+Enter');
     const card = page.getByTestId('alert-card').first();
     await expect(card).toBeVisible({ timeout: 15000 });
@@ -62,7 +63,7 @@ test.describe('Diagnóstico theme', () => {
 
   test('severity is also encoded by underline shape, not only by color', async ({ page }) => {
     await page.goto('/');
-    await page.locator('textarea').fill('We really use this in order to test it.\nThe file was deleted by the user.');
+    await setText(page, 'We really use this in order to test it.\nThe file was deleted by the user.');
     await page.keyboard.press('Control+Enter');
     await expect(page.getByTestId('alert-card').first()).toBeVisible({ timeout: 15000 });
 
@@ -86,7 +87,7 @@ test.describe('Diagnóstico theme', () => {
         await page.goto('/');
         await page.waitForLoadState('networkidle');
         const sheet = await color(page, 'section', 'backgroundColor');
-        const ink = await color(page, 'textarea', 'color');
+        const ink = await color(page, '.cm-content', 'color');
         const secondary = await color(page, 'header span[data-testid="review-status"]', 'color').catch(() => ink);
         expect(contrast(ink, sheet)).toBeGreaterThanOrEqual(4.5);
         expect(contrast(secondary, await color(page, 'header', 'backgroundColor'))).toBeGreaterThanOrEqual(4.5);
@@ -102,9 +103,11 @@ test.describe('Diagnóstico theme', () => {
 
   test('interface and editor use Atkinson Hyperlegible, not the template font', async ({ page }) => {
     await page.goto('/');
+    // CodeMirror mounts after hydration
+    await expect(editor(page)).toBeVisible();
     const fonts = await page.evaluate(() => ({
       ui: getComputedStyle(document.body).fontFamily,
-      editor: getComputedStyle(document.querySelector('textarea') as Element).fontFamily,
+      editor: getComputedStyle(document.querySelector('.cm-content') as Element).fontFamily,
     }));
     expect(fonts.ui).toContain('Atkinson Hyperlegible Next');
     expect(fonts.editor).toContain('Atkinson Hyperlegible Mono');

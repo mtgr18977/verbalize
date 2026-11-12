@@ -1,11 +1,12 @@
 import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
+import { editor, setText } from './helpers/editor';
 
 const WITH_ALERTS = 'We really use this in order to test it.';
 const CLEAN = 'Install the package.';
 
 async function runLint(page: Page, text: string): Promise<void> {
-  await page.locator('textarea').fill(text);
+  await setText(page, text);
   await page.getByRole('button', { name: /Run Linting/ }).click();
 }
 
@@ -28,9 +29,16 @@ test.describe('review states', () => {
     await runLint(page, WITH_ALERTS);
     await expect(page.getByTestId('alert-card').first()).toBeVisible({ timeout: 15000 });
 
-    await page.locator('textarea').fill(WITH_ALERTS + ' Edited.');
+    // Text added after the alerts: the notice appears, but the alerts follow the text and stay valid
+    await editor(page).press('Control+End');
+    await page.keyboard.type(' Edited.');
     await expect(page.getByText(/The text changed after the last review/)).toBeVisible();
-    await expect(page.getByText('line changed').first()).toBeVisible();
+    await expect(page.getByTestId('review-status')).toHaveText('Out of date');
+    await expect(page.getByText('text edited')).toHaveCount(0);
+
+    // Replacing the text removes what the alerts pointed at: they are marked as edited
+    await setText(page, 'Completely different words.');
+    await expect(page.getByText('text edited').first()).toBeVisible();
 
     await page.getByRole('button', { name: /Run Linting/ }).click();
     await expect(page.getByText(/The text changed after the last review/)).toHaveCount(0);
@@ -44,8 +52,8 @@ test.describe('running a review', () => {
 
     await expect(page.getByRole('button', { name: /Run Linting/ })).toBeVisible();
 
-    await page.locator('textarea').fill(WITH_ALERTS);
-    await page.locator('textarea').press('Control+Enter');
+    await setText(page, WITH_ALERTS);
+    await editor(page).press('Control+Enter');
     await expect(page.getByTestId('alert-card').first()).toBeVisible({ timeout: 15000 });
   });
 

@@ -1,66 +1,31 @@
-
 import { test, expect } from '@playwright/test';
+import { review } from './helpers/editor';
 
-test('verify yellowish selection color and centered scroll', async ({ page }) => {
+const FILLER = Array.from({ length: 60 }, (_, i) => `Paragraph ${i + 1} describes the install step.`).join('\n\n');
+
+test('selecting an alert scrolls it to the middle of the editor and highlights it', async ({ page }) => {
   await page.goto('/');
 
-  const textarea = page.locator('textarea');
+  await review(page, `${FILLER}\n\nWe really use this in order to test it.\n\n${FILLER}`);
+  const card = page.getByTestId('alert-card').filter({ hasText: 'Google.WordList' });
+  await expect(card).toBeVisible({ timeout: 15000 });
+  await card.click();
 
-  const content = 'Line 1\n' + 'Wrap '.repeat(100) + '\n'.repeat(50) + 'Target Alert\n' + '\n'.repeat(50) + 'End';
-  await textarea.fill(content);
+  const geometry = await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const scroller = document.querySelector('.cm-scroller')?.getBoundingClientRect();
+        const selection = document.querySelector('.cm-selectionBackground')?.getBoundingClientRect();
+        if (!scroller || !selection) return null;
+        const middleOfEditor = scroller.top + scroller.height / 2;
+        const middleOfSelection = selection.top + selection.height / 2;
+        return Math.abs(middleOfEditor - middleOfSelection);
+      })
+    )
+    .toBeLessThan(40);
+  void geometry;
 
-  const result = await page.evaluate(() => {
-    const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
-    const content = textarea.value;
-    const targetText = 'Target Alert';
-
-    const lines = content.split('\n');
-    let offset = 0;
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].includes(targetText)) {
-        break;
-      }
-      offset += lines[i].length + 1;
-    }
-
-    const end = offset + targetText.length;
-
-    const shadow = document.createElement('textarea');
-    const style = window.getComputedStyle(textarea);
-    const props = [
-      'width', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
-      'font-size', 'font-family', 'line-height', 'box-sizing',
-      'word-wrap', 'white-space', 'letter-spacing', 'text-transform',
-      'text-align', 'text-indent', 'overflow-wrap'
-    ];
-    props.forEach(prop => {
-      shadow.style.setProperty(prop, style.getPropertyValue(prop));
-    });
-    shadow.style.position = 'absolute';
-    shadow.style.visibility = 'hidden';
-    shadow.style.height = '0';
-    shadow.style.overflow = 'hidden';
-    shadow.value = content.substring(0, end);
-    document.body.appendChild(shadow);
-    const selectionBottom = shadow.scrollHeight;
-    document.body.removeChild(shadow);
-
-    const scrollTo = selectionBottom - (textarea.clientHeight / 2);
-    textarea.scrollTop = Math.max(0, scrollTo);
-
-    const viewportMiddle = textarea.scrollTop + (textarea.clientHeight / 2);
-    return {
-        selectionBottom,
-        scrollTop: textarea.scrollTop,
-        clientHeight: textarea.clientHeight,
-        scrollHeight: textarea.scrollHeight,
-        viewportMiddle,
-        diff: Math.abs(selectionBottom - viewportMiddle)
-    };
-  });
-
-  if (process.env.DEBUG_UI_TESTS) {
-    console.log('Result:', result);
-  }
-  expect(result.diff).toBeLessThan(5);
+  // the selected text is drawn with the theme's selection color
+  const background = await page.locator('.cm-selectionBackground').first().evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(background).not.toBe('rgba(0, 0, 0, 0)');
 });

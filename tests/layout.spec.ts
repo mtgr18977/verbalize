@@ -1,17 +1,23 @@
 import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
+import { docText, editor, setText } from './helpers/editor';
 
 const DOC = '# Install\n\nWe really use this in order to test it.\nThe file was deleted by the user.';
 
 async function fillAndReview(page: Page, text: string = DOC): Promise<void> {
-  await page.locator('textarea').fill(text);
+  await setText(page, text);
   await page.getByRole('button', { name: /Run Linting/ }).click();
 }
 
-async function selectedText(page: Page): Promise<string> {
-  return page.locator('textarea').evaluate((el) => {
-    const area = el as HTMLTextAreaElement;
-    return area.value.slice(area.selectionStart, area.selectionEnd);
+/** True when a drawn selection overlaps the underlined alert text: the editor selected that alert. */
+async function selectionCoversAlert(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const selection = document.querySelector('.cm-selectionBackground')?.getBoundingClientRect();
+    if (!selection) return false;
+    return [...document.querySelectorAll('.cm-lintRange')].some((mark) => {
+      const box = mark.getBoundingClientRect();
+      return box.left < selection.right && box.right > selection.left && box.top < selection.bottom && box.bottom > selection.top;
+    });
   });
 }
 
@@ -20,20 +26,20 @@ test.describe('desktop layout', () => {
 
   test('editor and alerts sit side by side and the preview is a tab', async ({ page }) => {
     await page.goto('/');
-    await expect(page.locator('textarea')).toBeVisible();
+    await expect(editor(page)).toBeVisible();
     await expect(page.locator('#panel-alerts')).toBeVisible();
     await expect(page.locator('#panel-preview')).toBeHidden();
     // the phone navigation does not exist on desktop
     await expect(page.getByRole('tablist', { name: 'Panels' })).toBeHidden();
 
-    await page.locator('textarea').fill('# Hello\n\nSome *text*.');
+    await setText(page, '# Hello\n\nSome *text*.');
     await page.getByRole('tab', { name: 'Preview' }).click();
     await expect(page.locator('#panel-preview').getByRole('heading', { name: 'Hello' })).toBeVisible();
-    await expect(page.locator('textarea')).toBeHidden();
+    await expect(editor(page)).toBeHidden();
     await expect(page.locator('#panel-alerts')).toBeVisible();
 
     await page.getByRole('tab', { name: 'Editor' }).click();
-    await expect(page.locator('textarea')).toHaveValue('# Hello\n\nSome *text*.');
+    expect(await docText(page)).toBe('# Hello\n\nSome *text*.');
   });
 
   test('tabs follow the keyboard pattern: arrow keys move between them', async ({ page }) => {
@@ -52,11 +58,12 @@ test.describe('desktop layout', () => {
     await expect(page.getByTestId('alert-card').first()).toBeVisible({ timeout: 15000 });
 
     await page.getByRole('tab', { name: 'Preview' }).click();
-    await expect(page.locator('textarea')).toBeHidden();
+    await expect(editor(page)).toBeHidden();
 
     await page.getByTestId('alert-card').first().click();
-    await expect(page.locator('textarea')).toBeVisible();
-    expect((await selectedText(page)).length).toBeGreaterThan(0);
+    await expect(editor(page)).toBeVisible();
+    await expect(editor(page)).toBeFocused();
+    await expect.poll(() => selectionCoversAlert(page)).toBe(true);
   });
 });
 
@@ -78,7 +85,7 @@ test.describe('phone layout (390 x 844)', () => {
 
   test('opens on the editor with usable width, and the settings drawer starts closed', async ({ page }) => {
     await page.goto('/');
-    const area = await page.locator('textarea').boundingBox();
+    const area = await page.getByTestId('editor').boundingBox();
     expect(area!.width).toBeGreaterThan(340);
 
     await expect(page.locator('aside')).toHaveAttribute('inert', '');
@@ -86,7 +93,7 @@ test.describe('phone layout (390 x 844)', () => {
     expect(drawer!.x + drawer!.width).toBeLessThanOrEqual(0);
 
     // 16 px keeps iOS from zooming the page when the field is focused
-    const fontSize = await page.locator('textarea').evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+    const fontSize = await editor(page).evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
     expect(fontSize).toBeGreaterThanOrEqual(16);
   });
 
@@ -98,11 +105,11 @@ test.describe('phone layout (390 x 844)', () => {
 
     await tabs.nth(2).click();
     await expect(page.locator('#panel-alerts')).toBeVisible();
-    await expect(page.locator('textarea')).toBeHidden();
+    await expect(editor(page)).toBeHidden();
     await expect(page.getByText('Not reviewed yet')).toBeVisible();
 
     await tabs.nth(0).click();
-    await page.locator('textarea').fill('# Title\n\nBody text');
+    await setText(page, '# Title\n\nBody text');
     await tabs.nth(1).click();
     await expect(page.locator('#panel-preview').getByRole('heading', { name: 'Title' })).toBeVisible();
   });
@@ -113,13 +120,15 @@ test.describe('phone layout (390 x 844)', () => {
 
     await expect(page.locator('#panel-alerts')).toBeVisible({ timeout: 15000 });
     await expect(page.getByTestId('alert-card').first()).toBeVisible();
-    await expect(page.locator('textarea')).toBeHidden();
+    await expect(editor(page)).toBeHidden();
     // the tab shows how many alerts there are
     await expect(page.getByRole('tab', { name: /Alerts\s*\d+/ })).toBeVisible();
 
     await page.getByTestId('alert-card').first().click();
-    await expect(page.locator('textarea')).toBeVisible();
-    expect((await selectedText(page)).length).toBeGreaterThan(0);
+    await expect(editor(page)).toBeVisible();
+    await expect.poll(() => selectionCoversAlert(page)).toBe(true);
+    // the keyboard stays closed: the selection is drawn without focusing the editor
+    await expect(editor(page)).not.toBeFocused();
   });
 
   test('settings open as a drawer and close with Escape or by tapping outside', async ({ page }) => {
