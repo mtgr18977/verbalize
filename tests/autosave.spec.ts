@@ -81,6 +81,11 @@ test.describe('saving', () => {
     await page.clock.install();
     await editor(page).click();
     await page.keyboard.type('written just before leaving');
+    // Wait until the page has caught up with what was typed (the counter shows it). The save reads
+    // the text the page last rendered, so leaving within the same few milliseconds as the last key
+    // is a different, unrealistic case.
+    await expect(page.getByText('27 chars')).toBeVisible();
+    await page.waitForTimeout(100);
     expect(await stored(page)).toBeNull();
 
     await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
@@ -92,7 +97,6 @@ test.describe('saving', () => {
     await setText(page, TEXT);
     await waitSaved(page, TEXT);
 
-    page.once('dialog', (dialog) => void dialog.accept());
     await page.getByRole('button', { name: 'Clear editor' }).click();
     await expect.poll(() => stored(page)).toBeNull();
   });

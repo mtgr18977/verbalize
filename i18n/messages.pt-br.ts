@@ -90,7 +90,6 @@ export const ptBR: Record<keyof typeof en, string> = {
   'editor.ariaLabel': 'Texto do documento',
   'editor.copy': 'Copiar conteúdo',
   'editor.clear': 'Limpar editor',
-  'editor.confirmClear': 'Tem certeza de que quer limpar o editor?',
   'editor.documentView': 'Modo do documento',
   'editor.panels': 'Painéis',
   'editor.documentRegion': 'Documento',
@@ -137,6 +136,14 @@ export const ptBR: Record<keyof typeof en, string> = {
   'draft.startFresh': 'Começar do zero',
   'draft.confirmDiscard': 'Clique de novo para descartar',
   'draft.dismiss': 'Dispensar',
+
+  'toast.region': 'Notificações',
+  'toast.dismiss': 'Dispensar notificação',
+  'toast.undo': 'Desfazer',
+  'toast.retry': 'Tentar de novo',
+  'toast.cleared': 'Editor limpo.',
+  'status.failed': 'Revisão com falha',
+  'alerts.failedTitle': 'A revisão falhou',
 
   'error.emptyText': 'Digite algum texto para revisar.',
   'error.lintFailed': 'A revisão falhou: {message}',

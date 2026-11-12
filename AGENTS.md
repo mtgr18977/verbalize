@@ -375,6 +375,16 @@ npx playwright show-report
 - Preview: `components/asciidoc-preview.tsx` loads Asciidoctor.js (~100 KB gzip) and DOMPurify (~11 KB) the first time an AsciiDoc preview is opened, not before, and converts in secure mode. The HTML is never trusted (AsciiDoc passthrough blocks let raw HTML through): `lib/asciidoc-html.ts` removes scripts, frames, forms, SVG, MathML, stylesheets and inline styles, replaces every image with its alt text (a remote image would reveal the reader's address to the author), keeps only web links (external ones open with `rel="noopener noreferrer"`), and prefixes every id with `adoc-` so a document cannot take the place of an id of the page.
 - The editor highlights AsciiDoc with a small line-oriented parser (titles, delimited blocks, attributes, lists, admonitions, inline marks). It is not a grammar: Asciidoctor reads the document and Vale reports from its output.
 
+### Notices (no browser dialogs)
+
+- Never use `alert()`, `confirm()` or `prompt()`; the `no-alert` ESLint rule enforces it. They block the whole page, ignore the theme and the fonts, look different in every browser, and on a phone they take over the screen. Use `useToast().notify` (`components/toast.tsx`) instead, and write the text as a catalog message.
+- A notice is `info` (leaves after 8 s) or `error` (stays until dismissed, so reading it is never a race). Hovering or focusing a notice stops its countdown. It never takes focus, it is announced (`aria-live` region, `role="alert"` for errors), and it may carry one action. A notice with the same `id` replaces the earlier one. On a phone the region sits above the tab bar.
+- In tests, look for errors inside `getByTestId('toasts')`: Next adds its own `role="alert"` route announcer, so a bare `getByRole('alert')` matches two elements.
+- A failed review is shown three ways on purpose: a notice (visible from any panel on a phone), the alerts panel and the header status, so the reason is still there when the notice is gone. Only `busy`, `rate_limited` and a lost connection offer "Try again": a time limit or a bad rule is not fixed by repeating.
+- "Clear editor" clears at once and offers Undo instead of asking "are you sure?" (a question is answered by habit; undo protects the text however it was cleared). Undo brings back the review too, and the offer disappears as soon as the user writes, so it can never overwrite new work.
+- `LintEditor` treats a replacement of the text from outside (upload, clear, undo) differently from typing: it clears the old alerts at once and does not count the replacement as an edit to the alerts that are put back right after. Mixing these up made Undo restore the cards but not the underlines.
+- Plural forms: zero takes the plural form in every language (`0 caracteres`), although CLDR counts 0 as "one" for Portuguese.
+
 ### Design Constraints
 
 - Documents up to 200 KB (`MAX_INPUT_SIZE`) are linted per request. Larger files must be linted in sections. Vale's run time grows faster than linearly with the number of alerts (measured: 25 KB of alert-dense text takes about 5 s, 100 KB about 66 s), so `LINT_TIMEOUT_MS` is what actually bounds CPU time.

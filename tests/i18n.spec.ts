@@ -91,7 +91,9 @@ test.describe('the translator', () => {
     expect(pt('alerts.noAlertsTitle', { count: 1 })).toBe('Nenhum alerta em 1 linha');
     expect(pt('alerts.noAlertsTitle', { count: 12 })).toBe('Nenhum alerta em 12 linhas');
     expect(pt('editor.chars', { count: 1 })).toBe('1 caractere');
-    expect(pt('editor.chars', { count: 0 })).toBe('0 caractere');
+    // zero is plural in Brazilian Portuguese, although CLDR counts it as "one"
+    expect(pt('editor.chars', { count: 0 })).toBe('0 caracteres');
+    expect(createTranslator('en')('editor.chars', { count: 0 })).toBe('0 chars');
     expect(pt('editor.chars', { count: 2000 })).toBe('2000 caracteres');
   });
 
@@ -141,16 +143,6 @@ test.describe('the server decides the first paint', () => {
     expect(html).toContain('assistente de escrita');
   });
 });
-
-/** Dismisses the next browser dialog and returns a function that reads what it said. */
-function captureDialog(page: Page): () => string {
-  let message = '';
-  page.once('dialog', (dialog) => {
-    message = dialog.message();
-    void dialog.dismiss();
-  });
-  return () => message;
-}
 
 async function runAndWait(page: Page): Promise<void> {
   await review(page, DOC);
@@ -220,9 +212,8 @@ test.describe('the interface in Portuguese', () => {
       buffer: Buffer.from('extends: script\nmessage: x\nscope: raw\nscript: |\n  for true {}\n'),
     });
     await setText(page, 'hello world');
-    const message = captureDialog(page);
     await page.getByRole('button', { name: /Revisar/ }).click();
-    await expect.poll(message).toBe('A revisão falhou: Regra “loop.yml”: regras de script não são permitidas.');
+    await expect(page.getByTestId('toasts').getByRole('alert')).toContainText('A revisão falhou: Regra “loop.yml”: regras de script não são permitidas.');
   });
 
   test('dates and times follow the language', async ({ page }) => {
@@ -255,9 +246,8 @@ test.describe('the interface in English', () => {
       buffer: Buffer.from('extends: script\nmessage: x\nscope: raw\nscript: |\n  for true {}\n'),
     });
     await setText(page, 'hello world');
-    const message = captureDialog(page);
     await page.getByRole('button', { name: /Run Linting/ }).click();
-    await expect.poll(message).toBe('Linting failed: Rule “loop.yml”: script rules are not allowed.');
+    await expect(page.getByTestId('toasts').getByRole('alert')).toContainText('Linting failed: Rule “loop.yml”: script rules are not allowed.');
   });
 });
 

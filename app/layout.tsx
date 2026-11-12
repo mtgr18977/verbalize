@@ -3,6 +3,7 @@ import { cookies, headers } from "next/headers";
 import { Atkinson_Hyperlegible_Next, Atkinson_Hyperlegible_Mono } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "./components/ThemeProvider";
+import { ToastProvider } from "@/components/toast";
 import { I18nProvider } from "@/i18n/provider";
 import { LOCALE_COOKIE, resolveLocale } from "@/i18n/locale";
 import type { Locale } from "@/i18n/locale";
@@ -72,7 +73,7 @@ export default async function RootLayout({
             enableSystem
             disableTransitionOnChange
           >
-            {children}
+            <ToastProvider>{children}</ToastProvider>
           </ThemeProvider>
         </I18nProvider>
       </body>

@@ -89,7 +89,6 @@ export const en = {
   'editor.ariaLabel': 'Document text',
   'editor.copy': 'Copy content',
   'editor.clear': 'Clear editor',
-  'editor.confirmClear': 'Are you sure you want to clear the editor?',
   'editor.documentView': 'Document view',
   'editor.panels': 'Panels',
   'editor.documentRegion': 'Document',
@@ -136,6 +135,14 @@ export const en = {
   'draft.startFresh': 'Start fresh',
   'draft.confirmDiscard': 'Click again to discard',
   'draft.dismiss': 'Dismiss',
+
+  'toast.region': 'Notifications',
+  'toast.dismiss': 'Dismiss notification',
+  'toast.undo': 'Undo',
+  'toast.retry': 'Try again',
+  'toast.cleared': 'Editor cleared.',
+  'status.failed': 'Review failed',
+  'alerts.failedTitle': 'The review failed',
 
   'error.emptyText': 'Please enter some text to lint.',
   'error.lintFailed': 'Linting failed: {message}',

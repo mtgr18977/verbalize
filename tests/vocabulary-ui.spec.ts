@@ -406,13 +406,8 @@ test.describe('in Portuguese', () => {
       route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'x', code: 'vocabulary_too_many', params: { max: 500 } }) })
     );
     await setText(page, 'hello');
-    let message = '';
-    page.once('dialog', (d) => {
-      message = d.message();
-      void d.dismiss();
-    });
     await page.getByRole('button', { name: /Revisar/ }).click();
-    await expect.poll(() => message).toBe('A revisão falhou: O vocabulário tem termos demais. O máximo é 500 por lista.');
+    await expect(page.getByTestId('toasts').getByRole('alert')).toContainText('A revisão falhou: O vocabulário tem termos demais. O máximo é 500 por lista.');
   });
 });
 

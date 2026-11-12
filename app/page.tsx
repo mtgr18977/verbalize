@@ -8,6 +8,7 @@ import { Sun, Moon, Upload, Copy, Check, Trash2, Settings, PlayCircle, ExternalL
 import { DraftStatusLabel, RestoredNotice } from '@/components/draft-status';
 import { AsciidocPreview } from '@/components/asciidoc-preview';
 import { LintEditor } from '@/components/lint-editor';
+import { useToast } from '@/components/toast';
 import { VocabularyDialog } from '@/components/vocabulary-dialog';
 import type { LintEditorHandle } from '@/components/lint-editor';
 import { useDraftAutosave } from '@/hooks/use-draft-autosave';
@@ -36,6 +37,8 @@ interface PanelMessageProps {
   icon: React.ReactNode;
   title: string;
   detail: string;
+  /** A button under the text, such as "Try again". */
+  action?: React.ReactNode;
 }
 
 interface SeverityTone {
@@ -141,7 +144,7 @@ function buildSnippet(line: string, span: [number, number], lineNumber: number):
   };
 }
 
-function PanelMessage({ icon, title, detail }: PanelMessageProps): React.JSX.Element {
+function PanelMessage({ icon, title, detail, action }: PanelMessageProps): React.JSX.Element {
   return (
     <div role="status" className="p-6">
       <p className="flex items-center gap-2 text-sm font-semibold text-ink">
@@ -149,6 +152,7 @@ function PanelMessage({ icon, title, detail }: PanelMessageProps): React.JSX.Ele
         {title}
       </p>
       <p className="mt-2 text-sm text-ink-2 max-w-[34ch]">{detail}</p>
+      {action && <div className="mt-3">{action}</div>}
     </div>
   );
 }
@@ -198,7 +202,10 @@ export default function Home() {
   // false on the server and during hydration, true afterwards: avoids a theme-icon mismatch
   const mounted = useSyncExternalStore(subscribeNoop, () => true, () => false);
   const [snapshot, setSnapshot] = useState<ReviewSnapshot | null>(null);
+  // Why the last review failed. Kept in the alerts panel after the notice is gone.
+  const [reviewError, setReviewError] = useState<string | null>(null);
   const { t, locale, setLocale, formatTime } = useI18n();
+  const toast = useToast();
   // `theme` is "system" until the user picks one; `resolvedTheme` is what is actually shown
   const { resolvedTheme, setTheme } = useTheme();
 
@@ -222,11 +229,16 @@ export default function Home() {
   const docInputRef = useRef<HTMLInputElement>(null);
   const editorHandleRef = useRef<LintEditorHandle>(null);
   const pendingRevealRef = useRef<number | null>(null);
+  // "Try again" in a notice runs the latest version of the review, not the one it was created with
+  const lintRef = useRef<() => Promise<void>>(async () => undefined);
+  // The notice that offers to undo "Clear editor"; it goes away as soon as the user writes something
+  const undoToastRef = useRef<string | null>(null);
 
   const handleLint = useCallback(async (): Promise<void> => {
     if (loading) return;
     if (!text.trim()) {
-      alert(t('error.emptyText'));
+      toast.notify({ id: 'empty-text', message: t('error.emptyText') });
+      editorHandleRef.current?.focus();
       return;
     }
 
@@ -236,6 +248,18 @@ export default function Home() {
       setText(normalizedText);
     }
 
+    const fail = (message: string, canRetry: boolean): void => {
+      setReviewError(message);
+      toast.notify({
+        id: 'review-error',
+        kind: 'error',
+        message,
+        action: canRetry ? { label: t('toast.retry'), onClick: () => void lintRef.current() } : undefined,
+      });
+    };
+
+    toast.dismiss('review-error');
+    setReviewError(null);
     setLoading(true);
     setResults([]);
     setResolvedIds(new Set());
@@ -266,15 +290,21 @@ export default function Home() {
         if (!window.matchMedia(DESKTOP_QUERY).matches) setView('alerts');
       } else {
         console.error('Linting error:', data);
-        alert(t('error.lintFailed', { message: describeApiError(data, t) }));
+        // A busy server or a rate limit may pass; a text that is too long or a bad rule will not
+        const code = typeof data === 'object' && data !== null ? (data as { code?: unknown }).code : undefined;
+        fail(t('error.lintFailed', { message: describeApiError(data, t) }), code === 'busy' || code === 'rate_limited');
       }
     } catch (error) {
       console.error('Failed to lint:', error);
-      alert(t('error.connection'));
+      fail(t('error.connection'), true);
     } finally {
       setLoading(false);
     }
-  }, [loading, text, style, format, customRules, vocabulary, t]);
+  }, [loading, text, style, format, customRules, vocabulary, t, toast]);
+
+  useEffect(() => {
+    lintRef.current = handleLint;
+  });
 
   // Ctrl/Cmd + Enter runs the review from anywhere, including with the sidebar closed
   useEffect(() => {
@@ -350,14 +380,45 @@ export default function Home() {
     setSnapshot(null);
   };
 
-  const clearEditor = () => {
-    if (text && confirm(t('editor.confirmClear'))) {
-      setText('');
-      setResults([]);
-      setResolvedIds(new Set());
-      setSnapshot(null);
-    }
+  /**
+   * Clears at once and offers to undo, instead of asking "are you sure?" first. A question gets
+   * answered by habit; being able to take it back protects the text however it was cleared.
+   */
+  const clearEditor = (): void => {
+    if (!text) return;
+    const previous = { text, results, resolvedIds, snapshot };
+
+    setText('');
+    setResults([]);
+    setResolvedIds(new Set());
+    setSnapshot(null);
+    setReviewError(null);
+
+    undoToastRef.current = toast.notify({
+      id: 'cleared',
+      message: t('toast.cleared'),
+      durationMs: 10000,
+      action: {
+        label: t('toast.undo'),
+        onClick: () => {
+          // The review comes back too: it is still valid for the same text
+          setText(previous.text);
+          setResults(previous.results);
+          setResolvedIds(previous.resolvedIds);
+          setSnapshot(previous.snapshot);
+          undoToastRef.current = null;
+        },
+      },
+    });
   };
+
+  // Undo only makes sense while the editor is still empty: once the user writes, it would overwrite their work
+  useEffect(() => {
+    if (undoToastRef.current && text !== '') {
+      toast.dismiss(undoToastRef.current);
+      undoToastRef.current = null;
+    }
+  }, [text, toast]);
 
   // On a phone the keyboard stays closed: the selection is shown without focusing the editor
   const revealAlert = (id: number): void => {
@@ -397,7 +458,7 @@ export default function Home() {
 
     if (!vocabulary.accept.includes(term)) {
       if (vocabulary.accept.length >= MAX_VOCABULARY_TERMS) {
-        alert(t('vocab.full', { max: MAX_VOCABULARY_TERMS }));
+        toast.notify({ id: 'vocabulary-full', kind: 'error', message: t('vocab.full', { max: MAX_VOCABULARY_TERMS }) });
         return;
       }
       setVocabulary({ ...vocabulary, accept: [...vocabulary.accept, term] });
@@ -464,7 +525,9 @@ export default function Home() {
   // Replaces the old "Live Editor" badge: the status always reflects the real state of the text
   const statusLabel = loading
     ? t('status.reviewing')
-    : snapshot === null
+    : reviewError
+      ? t('status.failed')
+      : snapshot === null
       ? t('status.notReviewed')
       : isStale
         ? t('status.outOfDate')
@@ -477,6 +540,24 @@ export default function Home() {
           icon={<LoaderCircle className="w-4 h-4 text-accent animate-spin motion-reduce:animate-none" />}
           title={t('alerts.reviewingTitle')}
           detail={t('alerts.reviewingDetail', { style: styleLabel })}
+        />
+      );
+    }
+    if (snapshot === null && reviewError) {
+      return (
+        <PanelMessage
+          icon={<TriangleAlert className="w-4 h-4 text-err" />}
+          title={t('alerts.failedTitle')}
+          detail={reviewError}
+          action={
+            <button
+              type="button"
+              onClick={() => void handleLint()}
+              className="min-h-9 border border-accent px-3 text-sm font-semibold text-accent hover:bg-accent hover:text-on-accent lg:min-h-0 lg:py-1"
+            >
+              {t('toast.retry')}
+            </button>
+          }
         />
       );
     }
@@ -714,7 +795,7 @@ export default function Home() {
           <div className="flex items-center gap-2 sm:gap-3">
             <span
               data-testid="review-status"
-              className={`hidden font-mono text-xs sm:inline ${isStale ? 'font-semibold text-warn' : 'text-ink-2'}`}
+              className={`hidden font-mono text-xs sm:inline ${isStale || reviewError ? 'font-semibold text-warn' : 'text-ink-2'}`}
             >
               {statusLabel}
             </span>
@@ -817,7 +898,7 @@ export default function Home() {
                 )}
               </div>
               {results.length > 0 && (
-                <button onClick={() => { setResults([]); setSnapshot(null); }} className="py-2 text-xs font-medium text-accent underline underline-offset-2">{t('alerts.clear')}</button>
+                <button onClick={() => { setResults([]); setSnapshot(null); setReviewError(null); }} className="py-2 text-xs font-medium text-accent underline underline-offset-2">{t('alerts.clear')}</button>
               )}
             </div>
 

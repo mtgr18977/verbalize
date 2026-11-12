@@ -55,7 +55,6 @@ test.describe('editor basics', () => {
   test('text from outside (clear editor) replaces the document', async ({ page }) => {
     await page.goto('/');
     await editor(page).fill('something');
-    page.once('dialog', (dialog) => void dialog.accept());
     await page.getByRole('button', { name: 'Clear editor' }).click();
     expect(await docText(page)).toBe('');
   });
@@ -157,6 +156,20 @@ test.describe('alerts in the text', () => {
     await page.keyboard.press('F8');
     const selected = await page.evaluate(() => window.getSelection()?.toString() ?? '');
     expect(selected.length).toBeGreaterThan(0);
+  });
+
+  test('replacing the whole text from a file clears the underlines of the old one', async ({ page }) => {
+    await reviewed(page);
+    await expect(page.locator('.cm-lintRange').first()).toBeVisible();
+
+    await page.locator('input[type="file"]:not([accept=".yml"]):not([accept*="txt"])').first().setInputFiles({
+      name: 'other.md',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('Completely new words.\n'),
+    });
+    await expect.poll(() => docText(page)).toBe('Completely new words.\n');
+    await expect(page.locator('.cm-lintRange')).toHaveCount(0);
+    await expect(page.getByText('text edited').first()).toBeVisible();
   });
 
   test('a new review replaces the underlines', async ({ page }) => {

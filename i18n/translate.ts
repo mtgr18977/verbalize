@@ -35,8 +35,9 @@ export function createTranslator(locale: Locale): Translate {
     let message = lookup[key];
 
     if (typeof params?.count === 'number') {
-      const category = plurals.select(params.count);
-      // Categories other than "one" (zero, few, many...) use the general form
+      // Zero takes the plural form ("0 caracteres", "0 chars"), although CLDR's rule for Portuguese
+      // counts 0 as "one". Categories other than "one" (few, many...) use the general form.
+      const category = params.count === 0 ? 'other' : plurals.select(params.count);
       message = lookup[`${key}_${category === 'one' ? 'one' : 'other'}`] ?? lookup[`${key}_other`] ?? message;
     }
 

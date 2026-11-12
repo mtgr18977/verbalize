@@ -1,7 +1,7 @@
 'use client';
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from 'react';
-import { Compartment, EditorSelection, EditorState } from '@codemirror/state';
+import { Annotation, Compartment, EditorSelection, EditorState } from '@codemirror/state';
 import type { Extension } from '@codemirror/state';
 import {
   EditorView,
@@ -33,6 +33,8 @@ export interface LintEditorHandle {
   reveal: (id: number, options?: { focus?: boolean }) => void;
   /** Applies the `fixIndex`-th correction of an alert, if it is still in the document. */
   applyFix: (id: number, fixIndex: number) => void;
+  /** Puts the cursor in the editor. */
+  focus: () => void;
   /** Stops underlining these alerts, for ones resolved without changing the text. */
   dismiss: (ids: number[]) => void;
 }
@@ -67,6 +69,13 @@ interface Callbacks {
  * The editor is themed only with the CSS variables of the Diagnóstico theme (see globals.css),
  * so it follows light and dark mode without being reconfigured.
  */
+/**
+ * Marks a change that did not come from the user typing: the text was replaced from outside
+ * (a file upload, "Clear editor" and its undo). Alerts that pointed into the old text are cleared
+ * with it, and must not be mistaken for edits to alerts that are put back right afterwards.
+ */
+const externalChange = Annotation.define<boolean>();
+
 const theme = EditorView.theme({
   '&': { height: '100%', backgroundColor: 'transparent', color: 'var(--ink)' },
   '&.cm-focused': { outline: '2px solid var(--accent)', outlineOffset: '-2px' },
@@ -354,6 +363,9 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
             lastEmittedRef.current = text;
             callbacksRef.current.onChange(text);
 
+            // A replacement from outside already cleared the old alerts, and new ones may have arrived since
+            if (update.transactions.some((transaction) => transaction.annotation(externalChange))) return;
+
             const edited: Array<[number, number]> = [];
             update.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => edited.push([fromB, toB]));
             // Diagnostics cannot be changed while an update is in progress
@@ -379,7 +391,15 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
     const view = viewRef.current;
     if (!view || value === lastEmittedRef.current) return;
     lastEmittedRef.current = value;
-    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } });
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: value },
+      annotations: externalChange.of(true),
+    });
+    // The alerts belonged to the old text. Any that apply to the new one are set again by the
+    // effect below, in this same render, when a review is put back.
+    view.dispatch(setDiagnostics(view.state, []));
+    lastPositionsRef.current = new Map();
+    callbacksRef.current.onPositionsChange(new Map());
   }, [value]);
 
   // A new review arrived: underline its alerts, but only if the document is still the reviewed one
@@ -467,6 +487,7 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
         const action = target?.diagnostic.actions?.[fixIndex];
         if (view && target && action) action.apply(view, target.from, target.to);
       },
+      focus: () => viewRef.current?.focus(),
       dismiss: (ids) => {
         const view = viewRef.current;
         if (!view || ids.length === 0) return;

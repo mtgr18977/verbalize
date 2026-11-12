@@ -112,13 +112,8 @@ test.describe('reviewing AsciiDoc', () => {
     );
     await useAsciidoc(page);
     await setText(page, ADOC);
-    let message = '';
-    page.once('dialog', (dialog) => {
-      message = dialog.message();
-      void dialog.dismiss();
-    });
     await page.getByRole('button', { name: /Run Linting/ }).click();
-    await expect.poll(() => message).toBe('Linting failed: AsciiDoc support is not available on this server.');
+    await expect(page.getByTestId('toasts').getByRole('alert')).toContainText('Linting failed: AsciiDoc support is not available on this server.');
   });
 });
 
