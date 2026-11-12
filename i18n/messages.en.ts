@@ -28,6 +28,21 @@ export const en = {
   'settings.language': 'Language / Idioma',
 
   'settings.vocabulary': 'Vocabulary',
+  'settings.ignoredRules': 'Ignored rules',
+
+  'ignore.button': 'Ignore rule',
+  'ignore.buttonLabel': 'Ignore rule {rule}',
+  'ignore.done_one': '{rule} is now ignored. {count} alert hidden.',
+  'ignore.done_other': '{rule} is now ignored. {count} alerts hidden.',
+  'ignore.summary_one': '{count} rule ignored',
+  'ignore.summary_other': '{count} rules ignored',
+  'ignore.none': 'No rules ignored. Use “Ignore rule” on an alert when a rule does not fit your project.',
+  'ignore.help': 'Ignored rules are switched off in every review, in any document.',
+  'ignore.remove': 'Stop ignoring {rule}',
+  'ignore.copy': 'Copy as .vale.ini lines',
+  'ignore.copied': 'Copied. Paste the lines under a [*.md] or [*.adoc] section of your .vale.ini.',
+  'ignore.copyFailed': 'Could not copy. Select the rules in the list and copy them by hand.',
+  'ignore.full': 'You already ignore {max} rules. Stop ignoring one to add another.',
 
   'vocab.title': 'Project vocabulary',
   'vocab.open': 'Edit vocabulary',
@@ -174,4 +189,6 @@ export const en = {
   'api.vocabulary_invalid': 'The vocabulary is not valid.',
   'api.vocabulary_too_many': 'The vocabulary has too many terms. The maximum is {max} per list.',
   'api.vocabulary_term_too_long': 'A vocabulary term is longer than {max} characters.',
+  'api.ignored_rules_invalid': 'The list of ignored rules is not valid.',
+  'api.ignored_rules_too_many': 'Too many ignored rules. The maximum is {max}.',
 } as const;

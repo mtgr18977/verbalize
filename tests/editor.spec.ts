@@ -129,7 +129,9 @@ test.describe('alerts in the text', () => {
 
     await expect(page.locator('.cm-lintRange', { hasText: 'in order to' })).toHaveCount(0);
     await expect(wordList(page)).toContainText('text edited');
-    await expect(wordList(page).getByRole('button')).toHaveCount(0);
+    // no fix is offered for text that moved; ignoring the rule does not depend on position
+    await expect(wordList(page).getByRole('button')).toHaveCount(1);
+    await expect(wordList(page).getByRole('button')).toHaveText('Ignore rule');
     // alerts elsewhere in the text are untouched
     await expect(page.locator('.cm-lintRange', { hasText: 'was deleted' })).toHaveCount(1);
   });

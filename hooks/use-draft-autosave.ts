@@ -3,14 +3,17 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from '
 import type { CustomRule } from '@/types/lint';
 import {
   DRAFT_KEY,
+  IGNORED_RULES_KEY,
   PREFS_KEY,
   VOCABULARY_KEY,
   parseDraft,
   parsePrefs,
+  readIgnoredRules,
   readStorage,
   readVocabulary,
   removeStorage,
   saveDraft,
+  saveIgnoredRules,
   savePrefs,
   saveVocabulary,
 } from '@/lib/draft-storage';
@@ -35,6 +38,8 @@ export interface RestoredDraft {
   format: DocumentFormat | null;
   /** The project vocabulary. Restored without a notice: it is configuration, not a draft. */
   vocabulary: Vocabulary | null;
+  /** Rules the user ignores. Configuration too, so restored without a notice. */
+  ignoredRules: string[] | null;
 }
 
 interface UseDraftAutosaveOptions {
@@ -43,6 +48,7 @@ interface UseDraftAutosaveOptions {
   format: DocumentFormat;
   customRules: CustomRule[];
   vocabulary: Vocabulary;
+  ignoredRules: string[];
   /** Called once, while rendering, with what was found in storage. */
   onRestore: (draft: RestoredDraft) => void;
 }
@@ -76,12 +82,13 @@ function subscribeStorage(onChange: () => void): () => void {
  * Saving only starts after the stored draft has been read, otherwise the empty editor of a fresh
  * page load would overwrite the draft it is about to restore.
  */
-export function useDraftAutosave({ text, style, format, customRules, vocabulary, onRestore }: UseDraftAutosaveOptions): DraftAutosave {
+export function useDraftAutosave({ text, style, format, customRules, vocabulary, ignoredRules, onRestore }: UseDraftAutosaveOptions): DraftAutosave {
   // false on the server and during hydration, true afterwards
   const hydrated = useSyncExternalStore(subscribeNoop, () => true, () => false);
   const rawDraft = useSyncExternalStore(subscribeStorage, () => readStorage(DRAFT_KEY), () => null);
   const rawPrefs = useSyncExternalStore(subscribeStorage, () => readStorage(PREFS_KEY), () => null);
   const rawVocabulary = useSyncExternalStore(subscribeStorage, () => readStorage(VOCABULARY_KEY), () => null);
+  const rawIgnoredRules = useSyncExternalStore(subscribeStorage, () => readStorage(IGNORED_RULES_KEY), () => null);
 
   const [restoreDone, setRestoreDone] = useState(false);
   const [enabled, setEnabledState] = useState(true);
@@ -96,13 +103,15 @@ export function useDraftAutosave({ text, style, format, customRules, vocabulary,
 
     const draft = prefs.autosave ? parseDraft(rawDraft) : null;
     const storedVocabulary = prefs.autosave ? readVocabulary(rawVocabulary) : null;
-    if (draft || prefs.style || prefs.format || storedVocabulary) {
+    const storedIgnoredRules = prefs.autosave ? readIgnoredRules(rawIgnoredRules) : null;
+    if (draft || prefs.style || prefs.format || storedVocabulary || storedIgnoredRules) {
       onRestore({
         text: draft?.text ?? '',
         customRules: draft?.customRules ?? [],
         style: prefs.style,
         format: prefs.format,
         vocabulary: storedVocabulary,
+        ignoredRules: storedIgnoredRules,
       });
     }
     if (draft && (draft.text.length > 0 || draft.customRules.length > 0)) {
@@ -135,11 +144,18 @@ export function useDraftAutosave({ text, style, format, customRules, vocabulary,
     return () => window.clearTimeout(timer);
   }, [active, vocabulary]);
 
+  // So are the ignored rules
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setTimeout(() => saveIgnoredRules(ignoredRules), SAVE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [active, ignoredRules]);
+
   // Save right away when the page is hidden or closed: a timer may never get to run, and on
   // phones the browser can discard a background tab without warning.
-  const latestRef = useRef({ text, customRules, vocabulary, active });
+  const latestRef = useRef({ text, customRules, vocabulary, ignoredRules, active });
   useEffect(() => {
-    latestRef.current = { text, customRules, vocabulary, active };
+    latestRef.current = { text, customRules, vocabulary, ignoredRules, active };
   });
   useEffect(() => {
     const flush = (): void => {
@@ -147,6 +163,7 @@ export function useDraftAutosave({ text, style, format, customRules, vocabulary,
       if (!latest.active) return;
       saveDraft(latest.text, latest.customRules);
       saveVocabulary(latest.vocabulary);
+      saveIgnoredRules(latest.ignoredRules);
     };
     const onVisibility = (): void => {
       if (document.visibilityState === 'hidden') flush();
@@ -171,6 +188,7 @@ export function useDraftAutosave({ text, style, format, customRules, vocabulary,
     } else {
       removeStorage(DRAFT_KEY);
       removeStorage(VOCABULARY_KEY);
+      removeStorage(IGNORED_RULES_KEY);
       setRestored(null);
       setStatus({ kind: 'off' });
     }

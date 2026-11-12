@@ -6,6 +6,7 @@ import type { DocumentFormat } from '@/lib/document-format';
 import { EMPTY_VOCABULARY } from '@/types/vocabulary';
 import type { Vocabulary } from '@/types/vocabulary';
 import { MAX_VOCABULARY_TERMS, MAX_VOCABULARY_TERM_LENGTH, normalizeTerms } from '@/lib/vocabulary';
+import { MAX_IGNORED_RULES, MAX_RULE_NAME_LENGTH, isRuleName, uniqueRules } from '@/lib/ignored-rules';
 
 /**
  * Limits and request guards for POST /api/lint.
@@ -36,7 +37,12 @@ export const MAX_RULE_LENGTH = 10 * 1024;
 /** Upper bound for Vale's JSON output (child_process default is only 1 MB). */
 export const MAX_VALE_OUTPUT_BYTES = 16 * 1024 * 1024;
 /** Request body cap; leaves room for JSON escaping of the text and the rules. */
-export const MAX_BODY_BYTES = 2 * MAX_INPUT_SIZE + 2 * MAX_CUSTOM_RULES * MAX_RULE_LENGTH + 2 * 2 * MAX_VOCABULARY_TERMS * MAX_VOCABULARY_TERM_LENGTH + 8 * 1024;
+export const MAX_BODY_BYTES =
+  2 * MAX_INPUT_SIZE +
+  2 * MAX_CUSTOM_RULES * MAX_RULE_LENGTH +
+  2 * 2 * MAX_VOCABULARY_TERMS * MAX_VOCABULARY_TERM_LENGTH +
+  2 * MAX_IGNORED_RULES * MAX_RULE_NAME_LENGTH +
+  8 * 1024;
 
 export const ALLOWED_STYLES = ['Google', 'Microsoft', 'RedHat'] as const;
 export type AllowedStyle = (typeof ALLOWED_STYLES)[number];
@@ -69,6 +75,8 @@ export interface LintRequest {
   format: DocumentFormat;
   customRules: CustomRule[];
   vocabulary: Vocabulary;
+  /** Rules switched off, as `Style.Rule`. Every name matches `isRuleName`. */
+  ignoredRules: string[];
 }
 
 interface RequestErrorOptions {
@@ -184,13 +192,31 @@ function parseVocabulary(value: unknown): Vocabulary {
   };
 }
 
+/**
+ * The names are written into the .vale.ini, which is line based: a name that is not exactly
+ * `Style.Rule` is refused instead of being cleaned up, so nothing odd ever reaches the file.
+ */
+function parseIgnoredRules(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.some((item) => !isRuleName(item))) {
+    throw new RequestError('ignoredRules must be an array of rule names like "Google.We"', 400, 'ignored_rules_invalid');
+  }
+  const rules = uniqueRules(value as string[]);
+  if (rules.length > MAX_IGNORED_RULES) {
+    throw new RequestError(`More than ${MAX_IGNORED_RULES} ignored rules`, 400, 'ignored_rules_too_many', {
+      params: { max: MAX_IGNORED_RULES },
+    });
+  }
+  return rules;
+}
+
 /** Validates the decoded JSON body. Every field is checked for type before it is used. */
 export function parseLintRequest(body: unknown): LintRequest {
   if (!isRecord(body)) {
     throw new RequestError('Request body must be a JSON object', 400, 'invalid_request');
   }
 
-  const { text, style, customRules, vocabulary, format } = body;
+  const { text, style, customRules, vocabulary, format, ignoredRules } = body;
 
   if (typeof text !== 'string' || text.length === 0) {
     throw new RequestError('No text provided or invalid format', 400, 'text_required');
@@ -245,6 +271,7 @@ export function parseLintRequest(body: unknown): LintRequest {
     format: isDocumentFormat(format) ? format : DEFAULT_FORMAT,
     customRules: rules,
     vocabulary: parseVocabulary(vocabulary),
+    ignoredRules: parseIgnoredRules(ignoredRules),
   };
 }
 

@@ -128,6 +128,7 @@ async function runVale(tmpDir: string, request: LintRequest): Promise<unknown[]>
       format: request.format,
       hasCustomRules,
       vocabulary: request.vocabulary,
+      ignoredRules: request.ignoredRules,
     })
   );
 

@@ -23,6 +23,7 @@ import { asciidoc } from '@/components/asciidoc-language';
 import type { DocumentFormat } from '@/lib/document-format';
 import type { AlertPosition, ReviewAlert } from '@/types/lint';
 import { useI18n } from '@/i18n/provider';
+import { isRuleName } from '@/lib/ignored-rules';
 import { describeFix, getAlertFixes } from '@/lib/vale-fixes';
 import { cleanVocabularyMessage } from '@/lib/vocabulary';
 import type { Fix } from '@/lib/vale-fixes';
@@ -51,6 +52,8 @@ interface LintEditorProps {
   onFixApplied: (id: number) => void;
   /** The user chose to accept the word of a spelling alert into the project vocabulary. */
   onAcceptTerm: (id: number) => void;
+  /** The user chose to ignore the rule of an alert (`Style.Rule`). */
+  onIgnoreRule: (rule: string) => void;
   /** Decides the syntax highlighting. */
   format: DocumentFormat;
   placeholderText: string;
@@ -63,6 +66,7 @@ interface Callbacks {
   onPositionsChange: (positions: Map<number, AlertPosition>) => void;
   onFixApplied: (id: number) => void;
   onAcceptTerm: (id: number) => void;
+  onIgnoreRule: (rule: string) => void;
 }
 
 /**
@@ -211,12 +215,12 @@ function runFix(view: EditorView, from: number, to: number, fix: Fix): void {
 }
 
 export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function LintEditor(
-  { value, onChange, alerts, reviewedText, onPositionsChange, onFixApplied, onAcceptTerm, format, placeholderText, ariaLabel, className },
+  { value, onChange, alerts, reviewedText, onPositionsChange, onFixApplied, onAcceptTerm, onIgnoreRule, format, placeholderText, ariaLabel, className },
   ref
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
-  const callbacksRef = useRef<Callbacks>({ onChange, onPositionsChange, onFixApplied, onAcceptTerm });
+  const callbacksRef = useRef<Callbacks>({ onChange, onPositionsChange, onFixApplied, onAcceptTerm, onIgnoreRule });
   const lastEmittedRef = useRef(value);
   const lastPositionsRef = useRef<Map<number, AlertPosition>>(new Map());
   // Diagnostic objects keep their original positions; this ties each one to its alert id
@@ -260,6 +264,13 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
         apply: () => callbacksRef.current.onAcceptTerm(alert.id),
       });
     }
+    // Not every rule can be switched off by name (see isRuleName): offer it only where it works
+    if (isRuleName(alert.Check)) {
+      actions.push({
+        name: translate('ignore.button'),
+        apply: () => callbacksRef.current.onIgnoreRule(alert.Check),
+      });
+    }
     const cleanMessage = cleanVocabularyMessage(alert.Check, alert.Message);
     const href = safeHttpUrl(alert.Link);
 
@@ -292,7 +303,7 @@ export const LintEditor = forwardRef<LintEditorHandle, LintEditorProps>(function
   }, []);
 
   useEffect(() => {
-    callbacksRef.current = { onChange, onPositionsChange, onFixApplied, onAcceptTerm };
+    callbacksRef.current = { onChange, onPositionsChange, onFixApplied, onAcceptTerm, onIgnoreRule };
   });
 
   useEffect(() => {

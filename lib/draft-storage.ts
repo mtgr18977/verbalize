@@ -1,5 +1,6 @@
 import { isDocumentFormat } from '@/lib/document-format';
 import type { DocumentFormat } from '@/lib/document-format';
+import { parseStoredIgnoredRules } from '@/lib/ignored-rules';
 import { parseStoredVocabulary } from '@/lib/vocabulary';
 import type { CustomRule } from '@/types/lint';
 import { EMPTY_VOCABULARY } from '@/types/vocabulary';
@@ -13,6 +14,7 @@ import type { Vocabulary } from '@/types/vocabulary';
 export const DRAFT_KEY = 'verbalize:draft:v1';
 export const PREFS_KEY = 'verbalize:prefs:v1';
 export const VOCABULARY_KEY = 'verbalize:vocabulary:v1';
+export const IGNORED_RULES_KEY = 'verbalize:ignored-rules:v1';
 
 // Same limits as the API (lib/lint-guards.ts), repeated here because that module is server-only
 const MAX_RULES = 10;
@@ -154,4 +156,17 @@ export function saveVocabulary(vocabulary: Vocabulary): boolean {
 
 export function readVocabulary(raw: string | null): Vocabulary | null {
   return parseStoredVocabulary(raw);
+}
+
+/** Saves the ignored rules, or removes the entry when there are none. Returns false if the browser refused. */
+export function saveIgnoredRules(rules: readonly string[]): boolean {
+  if (rules.length === 0) {
+    removeStorage(IGNORED_RULES_KEY);
+    return true;
+  }
+  return writeStorage(IGNORED_RULES_KEY, JSON.stringify(rules));
+}
+
+export function readIgnoredRules(raw: string | null): string[] | null {
+  return parseStoredIgnoredRules(raw);
 }

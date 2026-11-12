@@ -250,8 +250,10 @@ test.describe('accepting a word from a spelling alert', () => {
 
   test('a real misspelling is not offered a fix that would corrupt the text', async ({ page }) => {
     await withSpelling(page, 'Click Next to recieve it.');
-    // spelling alerts carry no replacement from Vale: the only action is to accept the word
-    await expect(alertCard(page, 'Vale.Spelling').getByRole('button')).toHaveCount(1);
+    // spelling alerts carry no replacement from Vale: the only actions are to accept the word or ignore the rule
+    await expect(alertCard(page, 'Vale.Spelling').getByRole('button')).toHaveCount(2);
+    await expect(alertCard(page, 'Vale.Spelling').getByRole('button', { name: /^Accept / })).toHaveCount(1);
+    await expect(alertCard(page, 'Vale.Spelling').getByRole('button', { name: /^Ignore rule / })).toHaveCount(1);
     expect(await docText(page)).toBe('Click Next to recieve it.');
   });
 });

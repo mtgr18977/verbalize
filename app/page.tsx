@@ -22,6 +22,7 @@ import type { Vocabulary } from '@/types/vocabulary';
 import { DEFAULT_FORMAT, DOCUMENT_ACCEPT, detectFormat } from '@/lib/document-format';
 import type { DocumentFormat } from '@/lib/document-format';
 import { describeFix, getAlertFixes } from '@/lib/vale-fixes';
+import { MAX_IGNORED_RULES, buildIgnoreLines, isRuleName } from '@/lib/ignored-rules';
 import { MAX_VOCABULARY_TERMS, cleanVocabularyMessage, usableTerms } from '@/lib/vocabulary';
 import { safeHttpUrl } from '@/lib/safe-url';
 
@@ -105,11 +106,11 @@ function getDesktopServerSnapshot(): boolean {
   return true;
 }
 
-/** Everything besides the text that changes what a review finds: the rules and the vocabulary. */
-function getRulesKey(rules: CustomRule[], vocabulary: Vocabulary, format: DocumentFormat): string {
+/** Everything besides the text that changes what a review finds: the rules, the vocabulary and the ignored rules. */
+function getRulesKey(rules: CustomRule[], vocabulary: Vocabulary, format: DocumentFormat, ignoredRules: readonly string[]): string {
   const rulesKey = rules.map((rule) => `${rule.name}\u0000${rule.content}`).join('\u0001');
   const vocabularyKey = JSON.stringify([usableTerms(vocabulary.accept), usableTerms(vocabulary.reject), vocabulary.spelling, vocabulary.enforceCase]);
-  return `${rulesKey}\u0002${vocabularyKey}\u0002${format}`;
+  return `${rulesKey}\u0002${vocabularyKey}\u0002${format}\u0002${[...ignoredRules].sort().join(',')}`;
 }
 
 function getSeverityTone(severity: string): SeverityTone {
@@ -187,6 +188,8 @@ export default function Home() {
   const [customRules, setCustomRules] = useState<CustomRule[]>([]);
   const [vocabulary, setVocabulary] = useState<Vocabulary>(EMPTY_VOCABULARY);
   const [vocabularyOpen, setVocabularyOpen] = useState(false);
+  // Rules the user switched off (`Style.Rule`): sent with every review and kept in this browser
+  const [ignoredRules, setIgnoredRules] = useState<string[]>([]);
   const [results, setResults] = useState<ReviewAlert[]>([]);
   // Alerts fixed with one click: hidden from the list until the next review
   const [resolvedIds, setResolvedIds] = useState<ReadonlySet<number>>(() => new Set());
@@ -216,10 +219,12 @@ export default function Home() {
     format,
     customRules,
     vocabulary,
+    ignoredRules,
     onRestore: (restored) => {
       setText(restored.text);
       setCustomRules(restored.customRules);
       if (restored.vocabulary) setVocabulary(restored.vocabulary);
+      if (restored.ignoredRules) setIgnoredRules(restored.ignoredRules);
       if (restored.format) setFormat(restored.format);
       if (restored.style && STYLE_OPTIONS.some((option) => option.value === restored.style)) setStyle(restored.style);
     },
@@ -233,6 +238,8 @@ export default function Home() {
   const lintRef = useRef<() => Promise<void>>(async () => undefined);
   // The notice that offers to undo "Clear editor"; it goes away as soon as the user writes something
   const undoToastRef = useRef<string | null>(null);
+  // Same idea for "Undo" after ignoring a rule
+  const undoIgnoreRef = useRef<(rule: string, hidden: number[]) => void>(() => undefined);
 
   const handleLint = useCallback(async (): Promise<void> => {
     if (loading) return;
@@ -280,12 +287,13 @@ export default function Home() {
             spelling: vocabulary.spelling,
             enforceCase: vocabulary.enforceCase,
           },
+          ignoredRules,
         }),
       });
       const data = await response.json();
       if (response.ok && Array.isArray(data)) {
         setResults((data as ValeAlert[]).map((alert, id) => ({ ...alert, id })));
-        setSnapshot({ text: normalizedText, style, rulesKey: getRulesKey(customRules, vocabulary, format), at: new Date() });
+        setSnapshot({ text: normalizedText, style, rulesKey: getRulesKey(customRules, vocabulary, format, ignoredRules), at: new Date() });
         // On a phone the results are on another tab: take the user there
         if (!window.matchMedia(DESKTOP_QUERY).matches) setView('alerts');
       } else {
@@ -300,7 +308,7 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [loading, text, style, format, customRules, vocabulary, t, toast]);
+  }, [loading, text, style, format, customRules, vocabulary, ignoredRules, t, toast]);
 
   useEffect(() => {
     lintRef.current = handleLint;
@@ -471,6 +479,69 @@ export default function Home() {
     editorHandleRef.current?.dismiss(sameWord);
   };
 
+  /**
+   * Switches a rule off and hides its alerts at once. The review stays current: taking a rule's
+   * alerts away is exactly what the server would do with the rule ignored. Undo is offered in a
+   * notice rather than a question.
+   */
+  const ignoreRule = (rule: string): void => {
+    if (!isRuleName(rule) || ignoredRules.includes(rule)) return;
+    if (ignoredRules.length >= MAX_IGNORED_RULES) {
+      toast.notify({ id: 'ignored-full', kind: 'error', message: t('ignore.full', { max: MAX_IGNORED_RULES }) });
+      return;
+    }
+
+    const hidden = results.filter((candidate) => candidate.Check === rule && !resolvedIds.has(candidate.id)).map((candidate) => candidate.id);
+    const next = [...ignoredRules, rule];
+    setIgnoredRules(next);
+    setResolvedIds(new Set([...resolvedIds, ...hidden]));
+    editorHandleRef.current?.dismiss(hidden);
+    // Only a review that was current stays current: a stale one is stale for other reasons too
+    const before = getRulesKey(customRules, vocabulary, format, ignoredRules);
+    const after = getRulesKey(customRules, vocabulary, format, next);
+    setSnapshot((current) => (current && current.rulesKey === before ? { ...current, rulesKey: after } : current));
+
+    toast.notify({
+      id: 'ignored-rule',
+      message: t('ignore.done', { rule, count: hidden.length }),
+      durationMs: 10000,
+      action: { label: t('toast.undo'), onClick: () => undoIgnoreRef.current(rule, hidden) },
+    });
+  };
+
+  const undoIgnore = (rule: string, hidden: number[]): void => {
+    const next = ignoredRules.filter((candidate) => candidate !== rule);
+    const stillResolved = new Set(resolvedIds);
+    hidden.forEach((id) => stillResolved.delete(id));
+    setIgnoredRules(next);
+    setResolvedIds(stillResolved);
+    const before = getRulesKey(customRules, vocabulary, format, ignoredRules);
+    const after = getRulesKey(customRules, vocabulary, format, next);
+    setSnapshot((current) => (current && current.rulesKey === before ? { ...current, rulesKey: after } : current));
+    // The underlines come back only while the document is still the reviewed one, and without the
+    // alerts that were resolved for other reasons. A new array is what makes the editor draw again.
+    if (snapshot && snapshot.text === text.replace(/\r\n/g, '\n')) {
+      setResults(results.filter((candidate) => !stillResolved.has(candidate.id)));
+    }
+  };
+
+  useEffect(() => {
+    undoIgnoreRef.current = undoIgnore;
+  });
+
+  const stopIgnoring = (rule: string): void => {
+    setIgnoredRules((previous) => previous.filter((candidate) => candidate !== rule));
+  };
+
+  const copyIgnoredRules = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(buildIgnoreLines(ignoredRules).join('\n'));
+      toast.notify({ id: 'ignored-copied', message: t('ignore.copied') });
+    } catch {
+      toast.notify({ id: 'ignored-copied', kind: 'error', message: t('ignore.copyFailed') });
+    }
+  };
+
   const markResolved = useCallback((id: number): void => {
     setResolvedIds((previous) => new Set(previous).add(id));
   }, []);
@@ -494,7 +565,7 @@ export default function Home() {
   const normalizedText = text.replace(/\r\n/g, '\n');
   const isStale =
     snapshot !== null &&
-    (snapshot.text !== normalizedText || snapshot.style !== style || snapshot.rulesKey !== getRulesKey(customRules, vocabulary, format));
+    (snapshot.text !== normalizedText || snapshot.style !== style || snapshot.rulesKey !== getRulesKey(customRules, vocabulary, format, ignoredRules));
   const textChanged = snapshot !== null && snapshot.text !== normalizedText;
   const styleLabel = STYLE_OPTIONS.find((option) => option.value === style)?.label ?? style;
   const visibleAlerts = useMemo(() => results.filter((alert) => !resolvedIds.has(alert.id)), [results, resolvedIds]);
@@ -737,6 +808,33 @@ export default function Home() {
             </button>
           </div>
 
+          {/* Ignored rules */}
+          <div data-testid="ignored-rules" className="space-y-2">
+            <span className="block text-xs font-semibold text-ink-2">{t('settings.ignoredRules')}</span>
+            {ignoredRules.length === 0 ? (
+              <p className="text-xs text-ink-2">{t('ignore.none')}</p>
+            ) : (
+              <>
+                <p data-testid="ignored-summary" className="text-sm text-ink">{t('ignore.summary', { count: ignoredRules.length })}</p>
+                <ul className="border-t border-rule">
+                  {ignoredRules.map((rule) => (
+                    <li key={rule} className="flex items-center justify-between border-b border-rule py-1.5">
+                      <span className="mr-2 truncate font-mono text-xs text-ink">{rule}</span>
+                      <button onClick={() => stopIgnoring(rule)} aria-label={t('ignore.remove', { rule })} className="p-2 text-ink-2 hover:text-err lg:p-1">
+                        <X className="h-4 w-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-xs text-ink-2">{t('ignore.help')}</p>
+                <button onClick={() => void copyIgnoredRules()} className={secondaryButton}>
+                  <Copy className="h-4 w-4" />
+                  <span>{t('ignore.copy')}</span>
+                </button>
+              </>
+            )}
+          </div>
+
           {/* Drafts */}
           <div className="space-y-2">
             <span className="block text-xs font-semibold text-ink-2">{t('settings.drafts')}</span>
@@ -870,6 +968,7 @@ export default function Home() {
                 onPositionsChange={setPositions}
                 onFixApplied={markResolved}
                 onAcceptTerm={acceptTerm}
+                onIgnoreRule={ignoreRule}
                 format={format}
                 placeholderText={t(format === 'asciidoc' ? 'editor.placeholderAsciidoc' : 'editor.placeholder')}
                 ariaLabel={t('editor.ariaLabel')}
@@ -929,6 +1028,8 @@ export default function Home() {
                     const snippet = buildSnippet((live ? currentLines : reviewedLines)[line - 1] ?? '', span, line);
                     const fixes = stale ? [] : getAlertFixes(alert);
                     const canAccept = !stale && alert.Check === 'Vale.Spelling';
+                    // Ignoring a rule does not depend on where the alert is, so it works on a stale card too
+                    const canIgnore = isRuleName(alert.Check);
                     const href = safeHttpUrl(alert.Link);
                     return (
                       <li
@@ -952,7 +1053,7 @@ export default function Home() {
                           {`${snippet.gutter} │ ${snippet.code}\n${' '.repeat(snippet.gutter.length)} │ `}
                           <span className={tone.text}>{snippet.pointer}</span>
                         </pre>
-                        {(fixes.length > 0 || canAccept) && (
+                        {(fixes.length > 0 || canAccept || canIgnore) && (
                           <div className="mt-2 flex flex-wrap gap-2">
                             {fixes.map((fix, fixIndex) => (
                               <button
@@ -971,6 +1072,17 @@ export default function Home() {
                                 className="min-h-9 border border-accent px-2.5 text-xs font-semibold text-accent hover:bg-accent hover:text-on-accent lg:min-h-0 lg:py-1"
                               >
                                 {t('vocab.acceptTerm', { term: alert.Match })}
+                              </button>
+                            )}
+                            {canIgnore && (
+                              <button
+                                type="button"
+                                data-action="ignore-rule"
+                                aria-label={t('ignore.buttonLabel', { rule: alert.Check })}
+                                onClick={() => ignoreRule(alert.Check)}
+                                className="min-h-9 border border-rule px-2.5 text-xs font-semibold text-ink-2 hover:border-ink-2 hover:text-ink lg:min-h-0 lg:py-1"
+                              >
+                                {t('ignore.button')}
                               </button>
                             )}
                           </div>

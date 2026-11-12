@@ -29,6 +29,21 @@ export const ptBR: Record<keyof typeof en, string> = {
   'settings.language': 'Language / Idioma',
 
   'settings.vocabulary': 'Vocabulário',
+  'settings.ignoredRules': 'Regras ignoradas',
+
+  'ignore.button': 'Ignorar regra',
+  'ignore.buttonLabel': 'Ignorar a regra {rule}',
+  'ignore.done_one': 'A regra {rule} agora é ignorada. {count} alerta oculto.',
+  'ignore.done_other': 'A regra {rule} agora é ignorada. {count} alertas ocultos.',
+  'ignore.summary_one': '{count} regra ignorada',
+  'ignore.summary_other': '{count} regras ignoradas',
+  'ignore.none': 'Nenhuma regra ignorada. Use “Ignorar regra” em um alerta quando uma regra não servir ao seu projeto.',
+  'ignore.help': 'As regras ignoradas ficam desligadas em todas as revisões, em qualquer documento.',
+  'ignore.remove': 'Parar de ignorar a regra {rule}',
+  'ignore.copy': 'Copiar como linhas do .vale.ini',
+  'ignore.copied': 'Copiado. Cole as linhas em uma seção [*.md] ou [*.adoc] do seu .vale.ini.',
+  'ignore.copyFailed': 'Não foi possível copiar. Selecione as regras da lista e copie à mão.',
+  'ignore.full': 'Você já ignora {max} regras. Pare de ignorar uma para incluir outra.',
 
   'vocab.title': 'Vocabulário do projeto',
   'vocab.open': 'Editar vocabulário',
@@ -175,4 +190,6 @@ export const ptBR: Record<keyof typeof en, string> = {
   'api.vocabulary_invalid': 'O vocabulário não é válido.',
   'api.vocabulary_too_many': 'O vocabulário tem termos demais. O máximo é {max} por lista.',
   'api.vocabulary_term_too_long': 'Um termo do vocabulário tem mais de {max} caracteres.',
+  'api.ignored_rules_invalid': 'A lista de regras ignoradas não é válida.',
+  'api.ignored_rules_too_many': 'Há regras ignoradas demais. O máximo é {max}.',
 };
