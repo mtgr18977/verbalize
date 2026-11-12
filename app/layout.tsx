@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Atkinson_Hyperlegible_Next, Atkinson_Hyperlegible_Mono } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "./components/ThemeProvider";
@@ -17,6 +17,18 @@ const editorFont = Atkinson_Hyperlegible_Mono({
 export const metadata: Metadata = {
   title: "Verbalize",
   description: "A writing assistant for technical writers, with Vale linting",
+};
+
+// viewportFit "cover" lets the bottom tab bar respect the phone's safe area (home indicator);
+// the browser chrome takes the color of the header.
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#FAFBFA" },
+    { media: "(prefers-color-scheme: dark)", color: "#151D19" },
+  ],
 };
 
 export default function RootLayout({

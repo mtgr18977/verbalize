@@ -291,6 +291,7 @@ npx playwright show-report
 - Severity is never color-only: errors use a wavy underline, warnings a dashed one and suggestions a dotted one.
 - Corners are 2-3 px, there are no shadows or gradients, labels are sentence case and at least 12 px (`text-xs`), and animations must respect `prefers-reduced-motion`.
 - Fonts are Atkinson Hyperlegible Next (interface) and Atkinson Hyperlegible Mono (editor), loaded in `app/layout.tsx` with variables on `<html>`.
+- Layout: below the `lg` breakpoint (1024 px) the app is a single column with a bottom tab bar (Editor, Preview, Alerts) and the settings are a drawer; from `lg` up the editor sits beside the alerts and Preview is a tab of the left pane. Use `h-dvh`, keep touch targets at 36 px or more on phones, and keep form fields at 16 px on phones so iOS does not zoom.
 - Alerts render as compiler-style diagnostics: severity, rule, position, the offending line and a `^^^` pointer. Tests find them with `data-testid="alert-card"`.
 
 ### Design Constraints

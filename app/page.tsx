@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback, useSyncExternalStore } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useTheme } from 'next-themes';
-import { Sun, Moon, Upload, Copy, Check, Trash2, Sidebar, PlayCircle, ExternalLink, FileText, FileSearch, LoaderCircle, TriangleAlert, X } from 'lucide-react';
+import { Sun, Moon, Upload, Copy, Check, Trash2, Settings, PlayCircle, ExternalLink, FileText, FileSearch, LoaderCircle, TriangleAlert, X } from 'lucide-react';
 
 interface ValeAlert {
   Action: {
@@ -46,6 +46,17 @@ interface SeverityTone {
   decoration: string;
 }
 
+type ViewMode = 'editor' | 'preview' | 'alerts';
+
+interface TabButtonProps {
+  mode: ViewMode;
+  scope: 'desktop' | 'mobile';
+  selected: boolean;
+  onSelect: (mode: ViewMode) => void;
+  className: string;
+  children: React.ReactNode;
+}
+
 interface Snippet {
   gutter: string;
   code: string;
@@ -58,11 +69,32 @@ const STYLE_OPTIONS = [
   { value: 'RedHat', label: 'Red Hat Style' },
 ] as const;
 
+// Matches Tailwind's `lg` breakpoint: below it the layout is a single column with tabs
+const DESKTOP_QUERY = '(min-width: 1024px)';
+const TAB_ORDER_DESKTOP: ViewMode[] = ['editor', 'preview'];
+const TAB_ORDER_MOBILE: ViewMode[] = ['editor', 'preview', 'alerts'];
+
 const SNIPPET_CHARS_BEFORE = 30;
 const SNIPPET_CHARS_AFTER = 40;
 
 function subscribeNoop(): () => void {
   return () => {};
+}
+
+function subscribeDesktop(onChange: () => void): () => void {
+  const query = window.matchMedia(DESKTOP_QUERY);
+  query.addEventListener('change', onChange);
+  return () => query.removeEventListener('change', onChange);
+}
+
+function getDesktopSnapshot(): boolean {
+  return window.matchMedia(DESKTOP_QUERY).matches;
+}
+
+// The server cannot know the screen size: assume desktop. Visibility is driven by CSS,
+// this value only decides which collapsed controls are made inert.
+function getDesktopServerSnapshot(): boolean {
+  return true;
 }
 
 function getRulesKey(rules: CustomRule[]): string {
@@ -105,6 +137,24 @@ function PanelMessage({ icon, title, detail }: PanelMessageProps): React.JSX.Ele
   );
 }
 
+function TabButton({ mode, scope, selected, onSelect, className, children }: TabButtonProps): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      role="tab"
+      id={`${scope}-tab-${mode}`}
+      data-tab={mode}
+      aria-selected={selected}
+      aria-controls={`panel-${mode}`}
+      tabIndex={selected ? 0 : -1}
+      onClick={() => onSelect(mode)}
+      className={className}
+    >
+      {children}
+    </button>
+  );
+}
+
 /** Label for the small column headers: sentence case, at least 12 px */
 function ColumnLabel({ children }: { children: React.ReactNode }): React.JSX.Element {
   return <span className="text-xs font-semibold text-ink-2">{children}</span>;
@@ -117,7 +167,11 @@ export default function Home() {
   const [results, setResults] = useState<ValeAlert[]>([]);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // null = the user has not chosen yet: open on desktop, closed (a drawer) on mobile
+  const [sidebarOpen, setSidebarOpen] = useState<boolean | null>(null);
+  const [view, setView] = useState<ViewMode>('editor');
+  const isDesktop = useSyncExternalStore(subscribeDesktop, getDesktopSnapshot, getDesktopServerSnapshot);
+  const sidebarVisible = sidebarOpen ?? isDesktop;
   // false on the server and during hydration, true afterwards: avoids a theme-icon mismatch
   const mounted = useSyncExternalStore(subscribeNoop, () => true, () => false);
   const [snapshot, setSnapshot] = useState<ReviewSnapshot | null>(null);
@@ -127,7 +181,7 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
-  const previewRef = useRef<HTMLDivElement>(null);
+  const pendingRevealRef = useRef<ValeAlert | null>(null);
 
   const handleLint = useCallback(async (): Promise<void> => {
     if (loading) return;
@@ -155,6 +209,8 @@ export default function Home() {
       if (response.ok && Array.isArray(data)) {
         setResults(data as ValeAlert[]);
         setSnapshot({ text: normalizedText, style, rulesKey: getRulesKey(customRules), at: new Date() });
+        // On a phone the results are on another tab: take the user there
+        if (!window.matchMedia(DESKTOP_QUERY).matches) setView('alerts');
       } else {
         console.error('Linting error:', data);
         alert('Linting failed: ' + (data.error || 'Unknown error'));
@@ -178,6 +234,16 @@ export default function Home() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [handleLint]);
+
+  // On a phone the settings are a drawer: Escape closes it
+  useEffect(() => {
+    if (sidebarOpen !== true || isDesktop) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setSidebarOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [sidebarOpen, isDesktop]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -226,23 +292,7 @@ export default function Home() {
     }
   };
 
-  const handleScroll = (e: React.UIEvent<HTMLElement>) => {
-    const source = e.currentTarget;
-    const target = source === editorRef.current ? previewRef.current : editorRef.current;
-
-    if (target) {
-      const percentage = source.scrollTop / (source.scrollHeight - source.clientHeight);
-      target.scrollTop = percentage * (target.scrollHeight - target.clientHeight);
-    }
-  };
-
-  const handleAlertClick = (alert: ValeAlert, e: React.MouseEvent) => {
-    // Prevent the click from being handled by parent elements if we clicked a link
-    if ((e.target as HTMLElement).closest('a')) return;
-
-    e.preventDefault();
-    e.stopPropagation();
-
+  const revealAlert = (alert: ValeAlert): void => {
     if (!editorRef.current) return;
 
     const textarea = editorRef.current;
@@ -292,6 +342,46 @@ export default function Home() {
     textarea.focus();
     // Setting selection range after focus and scroll for better compatibility
     textarea.setSelectionRange(start, end);
+  };
+
+  const handleAlertClick = (alert: ValeAlert, e: React.MouseEvent) => {
+    // Prevent the click from being handled by parent elements if we clicked a link
+    if ((e.target as HTMLElement).closest('a')) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (view === 'editor') {
+      revealAlert(alert);
+    } else {
+      // The editor is hidden (preview or alerts tab): show it first, then select the text
+      pendingRevealRef.current = alert;
+      setView('editor');
+    }
+  };
+
+  // Runs once the editor is visible again, because hidden elements cannot be measured or focused
+  useEffect(() => {
+    if (view === 'editor' && pendingRevealRef.current) {
+      const alert = pendingRevealRef.current;
+      pendingRevealRef.current = null;
+      revealAlert(alert);
+    }
+  });
+
+  const handleTabKeys = (event: React.KeyboardEvent<HTMLElement>, order: ViewMode[]): void => {
+    const current = order.indexOf(view);
+    const lastIndex = order.length - 1;
+    let next = -1;
+    if (event.key === 'ArrowRight') next = current >= lastIndex ? 0 : current + 1;
+    if (event.key === 'ArrowLeft') next = current <= 0 ? lastIndex : current - 1;
+    if (event.key === 'Home') next = 0;
+    if (event.key === 'End') next = lastIndex;
+    if (next < 0) return;
+
+    event.preventDefault();
+    setView(order[next]);
+    event.currentTarget.querySelector<HTMLElement>(`[data-tab="${order[next]}"]`)?.focus();
   };
 
   // Review state: results only count as current while the editor, style and rules still match
@@ -354,16 +444,44 @@ export default function Home() {
     : 'The style guide or custom rules changed after the last review. Press Run Linting (Ctrl+Enter) to refresh.';
 
   const secondaryButton =
-    'flex w-full items-center justify-center gap-2 border border-rule bg-transparent px-3 py-2 text-sm font-medium text-ink hover:border-ink-2 hover:bg-paper';
-  const iconButton = 'p-1.5 text-ink-2 hover:bg-select hover:text-ink';
+    'flex w-full items-center justify-center gap-2 border border-rule bg-transparent px-3 py-2.5 text-sm font-medium text-ink hover:border-ink-2 hover:bg-paper';
+  // Larger touch targets on phones, compact on desktop
+  const iconButton = 'p-2.5 text-ink-2 hover:bg-select hover:text-ink lg:p-1.5';
+
+  const tabClass = (selected: boolean): string =>
+    `flex h-full items-center px-4 text-sm font-semibold border-b-2 ${
+      selected ? 'border-accent text-ink' : 'border-transparent text-ink-2 hover:text-ink'
+    }`;
+  const mobileTabClass = (selected: boolean): string =>
+    `flex flex-1 items-center justify-center gap-2 border-t-2 py-3 text-sm font-semibold ${
+      selected ? 'border-accent text-ink' : 'border-transparent text-ink-2'
+    }`;
+
+  // Mobile shows one panel at a time. On desktop the alerts are always visible next to the
+  // editor, and the editor/preview tabs switch the left pane.
+  const documentPaneClass = view === 'alerts' ? 'hidden lg:flex' : 'flex';
+  const alertsPaneClass = view === 'alerts' ? 'flex' : 'hidden lg:flex';
 
   return (
-    <div className="flex h-screen overflow-hidden bg-paper font-sans text-ink">
-      {/* Sidebar. `inert` keeps the hidden controls out of the tab order when it is collapsed. */}
+    <div className="flex h-dvh overflow-hidden bg-paper font-sans text-ink">
+      {/* Backdrop for the mobile drawer */}
+      {sidebarOpen === true && (
+        <button
+          type="button"
+          tabIndex={-1}
+          aria-hidden="true"
+          onClick={() => setSidebarOpen(false)}
+          className="fixed inset-0 z-20 bg-ink/40 lg:hidden"
+        />
+      )}
+
+      {/* Settings: a drawer on phones, a column on desktop. `inert` keeps hidden controls out of the tab order. */}
       <aside
-        inert={!sidebarOpen}
+        inert={!sidebarVisible}
         aria-label="Settings"
-        className={`${sidebarOpen ? 'w-72' : 'w-0'} flex shrink-0 flex-col overflow-hidden border-r border-rule bg-sheet transition-[width] duration-200 motion-reduce:transition-none`}
+        className={`fixed inset-y-0 left-0 z-30 flex w-72 shrink-0 flex-col overflow-hidden border-r border-rule bg-sheet transition-[transform,width] duration-200 motion-reduce:transition-none lg:static lg:z-auto ${
+          sidebarOpen === true ? 'translate-x-0' : '-translate-x-full'
+        } ${sidebarOpen === false ? 'lg:w-0 lg:translate-x-0' : 'lg:w-72 lg:translate-x-0'}`}
       >
         <div className="flex h-14 shrink-0 items-center justify-between border-b border-rule px-5">
           <h2 className="text-base font-bold text-ink">Settings</h2>
@@ -376,11 +494,12 @@ export default function Home() {
           {/* Style Guide Selection */}
           <div className="space-y-2">
             <label htmlFor="style-guide" className="block text-xs font-semibold text-ink-2">Base style guide</label>
+            {/* 16 px on phones: smaller text makes iOS zoom the page when a field is focused */}
             <select
               id="style-guide"
               value={style}
               onChange={(e) => setStyle(e.target.value)}
-              className="w-full cursor-pointer border border-rule bg-paper px-3 py-2 text-sm font-medium text-ink"
+              className="w-full cursor-pointer border border-rule bg-paper px-3 py-2.5 text-base font-medium text-ink lg:text-sm"
             >
               {STYLE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -423,7 +542,7 @@ export default function Home() {
                 {customRules.map((rule, idx) => (
                   <li key={idx} className="flex items-center justify-between border-b border-rule py-1.5">
                     <span className="mr-2 truncate font-mono text-xs text-ink">{rule.name}</span>
-                    <button onClick={() => removeCustomRule(idx)} aria-label={`Remove rule ${rule.name}`} className="p-1 text-ink-2 hover:text-err">
+                    <button onClick={() => removeCustomRule(idx)} aria-label={`Remove rule ${rule.name}`} className="p-2 text-ink-2 hover:text-err lg:p-1">
                       <Trash2 className="h-4 w-4" />
                     </button>
                   </li>
@@ -453,20 +572,23 @@ export default function Home() {
       {/* Main Content */}
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* Top Header */}
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-rule bg-sheet px-5">
-          <div className="flex items-center gap-3">
-            {!sidebarOpen && (
-              <button onClick={() => setSidebarOpen(true)} aria-label="Open settings" className={iconButton}>
-                <Sidebar className="h-5 w-5" />
-              </button>
-            )}
+        <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-rule bg-sheet px-3 sm:px-5">
+          <div className="flex min-w-0 items-center gap-1 sm:gap-3">
+            {/* Always available on phones; on desktop only after the sidebar was closed */}
+            <button
+              onClick={() => setSidebarOpen(true)}
+              aria-label="Open settings"
+              className={`${iconButton} ${sidebarOpen === false ? '' : 'lg:hidden'}`}
+            >
+              <Settings className="h-5 w-5" />
+            </button>
             {/* The wavy underline is the universal "linter found something" mark */}
-            <h1 className="font-mono text-lg font-semibold text-ink underline decoration-err decoration-wavy decoration-[1.5px] underline-offset-[5px]">
+            <h1 className="font-mono text-base font-semibold text-ink underline decoration-err decoration-wavy decoration-[1.5px] underline-offset-[5px] sm:text-lg">
               verbalize
             </h1>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
             <span
               data-testid="review-status"
               className={`hidden font-mono text-xs sm:inline ${isStale ? 'font-semibold text-warn' : 'text-ink-2'}`}
@@ -477,7 +599,7 @@ export default function Home() {
               onClick={() => void handleLint()}
               disabled={loading}
               title="Run Linting (Ctrl/⌘ + Enter)"
-              className="flex items-center gap-2 border border-accent bg-accent px-4 py-1.5 text-sm font-bold text-on-accent hover:bg-ink hover:border-ink disabled:cursor-wait disabled:bg-ink-2 disabled:border-ink-2"
+              className="flex items-center gap-2 border border-accent bg-accent px-3 py-2 text-sm font-bold text-on-accent hover:bg-ink hover:border-ink disabled:cursor-wait disabled:bg-ink-2 disabled:border-ink-2 sm:px-4 lg:py-1.5"
             >
               {loading ? <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <PlayCircle className="h-4 w-4" />}
               <span>{loading ? 'Analyzing...' : 'Run Linting'}</span>
@@ -486,7 +608,7 @@ export default function Home() {
             {mounted && (
               <button
                 onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}
-                className="border border-rule p-1.5 text-ink-2 hover:border-ink-2 hover:text-ink"
+                className="border border-rule p-2.5 text-ink-2 hover:border-ink-2 hover:text-ink lg:p-1.5"
                 title="Toggle Theme"
                 aria-label="Toggle theme"
               >
@@ -496,55 +618,58 @@ export default function Home() {
           </div>
         </header>
 
-        {/* 3-Column Grid */}
-        <div className="grid flex-1 grid-cols-1 overflow-hidden lg:grid-cols-3">
+        {/* One panel at a time on phones; document (editor or preview) beside the alerts on desktop */}
+        <div className="flex min-h-0 flex-1 flex-col lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(22rem,30%)]">
 
-          {/* Column 1: Editor */}
-          <section className="flex flex-col overflow-hidden border-r border-rule bg-sheet">
-            <div className="flex h-10 shrink-0 items-center justify-between border-b border-rule bg-paper px-4">
-              <div className="flex items-baseline gap-3">
-                <ColumnLabel>Editor</ColumnLabel>
-                <span className="font-mono text-xs text-ink-2">{text.length} chars</span>
+          {/* Document: editor or preview */}
+          <section aria-label="Document" className={`${documentPaneClass} min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-sheet lg:border-r lg:border-rule`}>
+            <div className="flex h-10 shrink-0 items-center justify-between border-b border-rule bg-paper pl-4 pr-2 lg:pl-0">
+              <div className="flex h-full items-center">
+                <div
+                  role="tablist"
+                  aria-label="Document view"
+                  onKeyDown={(e) => handleTabKeys(e, TAB_ORDER_DESKTOP)}
+                  className="hidden h-full lg:flex"
+                >
+                  <TabButton mode="editor" scope="desktop" selected={view !== 'preview'} onSelect={setView} className={tabClass(view !== 'preview')}>Editor</TabButton>
+                  <TabButton mode="preview" scope="desktop" selected={view === 'preview'} onSelect={setView} className={tabClass(view === 'preview')}>Preview</TabButton>
+                </div>
+                <span className="lg:hidden"><ColumnLabel>{view === 'preview' ? 'Preview' : 'Editor'}</ColumnLabel></span>
+                <span className="ml-3 font-mono text-xs text-ink-2">{text.length} chars</span>
               </div>
-              <div className="flex gap-1">
-                <button onClick={copyToClipboard} title="Copy Content" aria-label="Copy content" className={`${iconButton} ${copied ? 'text-accent' : ''}`}>
-                  {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                </button>
-                <button onClick={clearEditor} title="Clear All" aria-label="Clear editor" className={`${iconButton} hover:text-err`}>
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              </div>
+              {view !== 'preview' && (
+                <div className="flex gap-1">
+                  <button onClick={copyToClipboard} title="Copy Content" aria-label="Copy content" className={`${iconButton} ${copied ? 'text-accent' : ''}`}>
+                    {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                  </button>
+                  <button onClick={clearEditor} title="Clear All" aria-label="Clear editor" className={`${iconButton} hover:text-err`}>
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              )}
             </div>
-            <textarea
-              ref={editorRef}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onScroll={handleScroll}
-              aria-label="Document text"
-              className="custom-scrollbar flex-1 resize-none bg-transparent p-6 font-mono text-[14.5px] leading-7 text-ink placeholder:text-ink-2 focus-visible:outline-offset-[-2px]"
-              placeholder="Start typing your documentation (Markdown supported)..."
-            />
-          </section>
 
-          {/* Column 2: Preview */}
-          <section className="flex flex-col overflow-hidden border-r border-rule bg-sheet">
-            <div className="flex h-10 shrink-0 items-center border-b border-rule bg-paper px-4">
-              <ColumnLabel>Preview</ColumnLabel>
+            <div id="panel-editor" role="tabpanel" aria-label="Editor" className={`${view === 'preview' ? 'hidden' : 'flex'} min-h-0 flex-1 flex-col`}>
+              <textarea
+                ref={editorRef}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                aria-label="Document text"
+                className="custom-scrollbar flex-1 resize-none bg-transparent p-4 font-mono text-base leading-7 text-ink placeholder:text-ink-2 focus-visible:outline-offset-[-2px] lg:p-6 lg:text-[14.5px]"
+                placeholder="Start typing your documentation (Markdown supported)..."
+              />
             </div>
-            <div
-              ref={previewRef}
-              onScroll={handleScroll}
-              className="custom-scrollbar flex-1 overflow-y-auto p-8"
-            >
-              <article className="prose prose-diagnostic max-w-none">
+
+            <div id="panel-preview" role="tabpanel" aria-label="Preview" className={`${view === 'preview' ? 'block' : 'hidden'} custom-scrollbar min-h-0 flex-1 overflow-y-auto p-5 lg:p-8`}>
+              <article className="prose prose-diagnostic">
                 {/* ReactMarkdown is secure by default as it does not render HTML unless explicitly configured with rehype-raw */}
                 <ReactMarkdown>{text || '*Rich preview will appear here...*'}</ReactMarkdown>
               </article>
             </div>
           </section>
 
-          {/* Column 3: Results */}
-          <section className="flex flex-col overflow-hidden bg-paper">
+          {/* Alerts */}
+          <section id="panel-alerts" role="tabpanel" aria-label="Alerts" className={`${alertsPaneClass} min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-paper`}>
             <div className="flex h-10 shrink-0 items-center justify-between border-b border-rule px-4">
               <div className="flex items-baseline gap-2">
                 <ColumnLabel>Alerts</ColumnLabel>
@@ -553,7 +678,7 @@ export default function Home() {
                 )}
               </div>
               {results.length > 0 && (
-                <button onClick={() => { setResults([]); setSnapshot(null); }} className="text-xs font-medium text-accent underline underline-offset-2">Clear</button>
+                <button onClick={() => { setResults([]); setSnapshot(null); }} className="py-2 text-xs font-medium text-accent underline underline-offset-2">Clear</button>
               )}
             </div>
 
@@ -599,7 +724,7 @@ export default function Home() {
                             href={alert.Link}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-accent underline underline-offset-2"
+                            className="mt-1.5 inline-flex items-center gap-1 py-1 text-xs font-medium text-accent underline underline-offset-2"
                             aria-label={`Open the style guide page for ${alert.Check}`}
                           >
                             Style guide <ExternalLink className="h-3 w-3" />
@@ -612,6 +737,23 @@ export default function Home() {
               )}
             </div>
           </section>
+        </div>
+
+        {/* Phone navigation: the three panels as tabs, within thumb reach */}
+        <div
+          role="tablist"
+          aria-label="Panels"
+          onKeyDown={(e) => handleTabKeys(e, TAB_ORDER_MOBILE)}
+          className="flex shrink-0 border-t border-rule bg-sheet pb-[env(safe-area-inset-bottom)] lg:hidden"
+        >
+          <TabButton mode="editor" scope="mobile" selected={view === 'editor'} onSelect={setView} className={mobileTabClass(view === 'editor')}>Editor</TabButton>
+          <TabButton mode="preview" scope="mobile" selected={view === 'preview'} onSelect={setView} className={mobileTabClass(view === 'preview')}>Preview</TabButton>
+          <TabButton mode="alerts" scope="mobile" selected={view === 'alerts'} onSelect={setView} className={mobileTabClass(view === 'alerts')}>
+            Alerts
+            {results.length > 0 && (
+              <span className={`font-mono text-xs ${isStale ? 'text-warn' : 'text-ink-2'}`}>{results.length}</span>
+            )}
+          </TabButton>
         </div>
       </main>
     </div>
